@@ -1,0 +1,17 @@
+[theme]
+base = "dark"
+primaryColor = "#8B5CF6"          # violet-500
+backgroundColor = "#0B1220"       # deep navy
+secondaryBackgroundColor = "#111827" # gray-900
+textColor = "#E5E7EB"             # gray-200
+font = "sans serif"
+
+[server]
+headless = true
+address = "0.0.0.0"
+port = 8501
+
+[browser]
+# Set default to wide layout for a modern dashboard feel
+gatherUsageStats = false
+

@@ -1,0 +1,14 @@
+version: "3.9"
+
+services:
+  frontend:
+    build:
+      context: ./app
+    container_name: docguard-frontend
+    ports:
+      - "8501:8501"
+    restart: unless-stopped
+
+networks:
+  default:
+    name: docguard-net
