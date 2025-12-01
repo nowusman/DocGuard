@@ -53,9 +53,9 @@ The design goals are:
   - PaddleOCR-based OCR with per-document caps and heuristics to skip low-value images
   - Configurable via UI checkbox at runtime
 - Table extraction:
-  - Camelot (lattice mode) with graceful fallback to simple text-based heuristics
+  - PyMuPDF `find_tables()` path with header/footer clipping
 - PDF text extraction:
-  - Single-pass PyMuPDF path (header/footer clipping + tables/images) with pdfplumber/PyPDF2 fallback
+  - Single-pass PyMuPDF path (header/footer clipping + tables/images)
 - In-session caching skips re-processing duplicate inputs (LRU per worker)
 - Built-in constraints:
   - 20MB per file max, 100MB total batch max (configurable in code)
@@ -68,9 +68,8 @@ The design goals are:
 - Streamlit UI: app/app.py
   - Handles uploads, option selection, progress, results, and downloads
 - Processing Core: app/document_processor.py
-  - Parsing & extraction: python-docx, pdfplumber, PyMuPDF, PyPDF2
+  - Parsing & extraction: python-docx and PyMuPDF (single-pass text/table/image extraction)
   - PII/NER: regex + spaCy (en_core_web_sm)
-  - Tables: Camelot (lattice)
   - OCR: PaddleOCR (CPU) with selective heuristics and per-document caps
   - PDF generation: ReportLab
 - Config: app/config.py
@@ -109,12 +108,10 @@ docker run -d -p 8501:8501 --name docprocessor docprocessor-streamlit
 Local (without Docker)
 - Python 3.12 recommended
 - System dependencies (Ubuntu/Debian):
-  - Ghostscript
-  - python3-tk (Camelot needs GUI libs even headless)
   - libgl1 and libglib2.0-0 (for PaddleOCR/OpenCV)
 ```
 sudo apt update
-sudo apt install -y python3-tk ghostscript libgl1 libglib2.0-0
+sudo apt install -y libgl1 libglib2.0-0
 ```
 - Install Python deps and run Streamlit
 ```
@@ -189,8 +186,7 @@ To change defaults, edit config.py or app.py and rebuild/redeploy.
 - Batch size: 10 files (UI-enforced)
 - File size limits: 20MB per file, 100MB per batch (UI-enforced)
 - OCR is CPU-intensive: disable via checkbox if not needed
-- Camelot (table extraction) relies on Ghostscript and may slow down complex PDFs
-- PyMuPDF single-pass extraction clips headers/footers via PDF_HEADER_RATIO (fallback to pdfplumber/PyPDF2 only when needed)
+- PyMuPDF single-pass extraction clips headers/footers via PDF_HEADER_RATIO
 - Per-worker LRU caching (MAX_CACHE_ITEMS) skips duplicate documents within a session
 - Container resources: Ensure adequate CPU/RAM for large batches or OCR-heavy workloads
 - The ProcessPool worker count defaults to `min(uploaded_files, MAX_WORKERS)` so that batches saturate available CPU
