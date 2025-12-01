@@ -13,7 +13,7 @@ A document processing Web app based on Streamlit, providing document anonymizati
 - Parallel per-file processing with live status as files complete
 - "Advanced options" expander for throughput mode (skip OCR/tables, regex-only PII) and verbose logging
 - "Processing Details" expander surfaces per-stage timing for the first processed file
-- Single-pass PyMuPDF PDF extraction (text/tables/images) with automatic fallback when needed
+- Single-pass PyMuPDF PDF extraction (text/tables/images)
 - In-session LRU caching skips duplicate re-processing within a worker process
 
 ### Installation and operation
@@ -41,7 +41,7 @@ docker ps
 ```
 # In WSL/Ubuntu
 sudo apt update
-sudo apt install -y python3-tk ghostscript libgl1 libglib2.0-0
+sudo apt install -y libgl1 libglib2.0-0
 ```
 
 1. Building Streamlit application images and running containers

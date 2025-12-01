@@ -194,7 +194,7 @@ To change defaults, edit config.py or app.py and rebuild/redeploy.
 ---
 
 ## Performance Tips
-- Disable OCR (or enable throughput mode) for text-heavy batches to skip expensive image work and Camelot table extraction.
+- Disable OCR (or enable throughput mode) for text-heavy batches to skip expensive image work and table extraction.
 - Keep MAX_WORKERS in sync with available CPU cores; the UI shows how many workers are available for the current deployment.
 - Use the Processing Details expander to inspect timing per stage and identify bottlenecks on representative files.
 - Verbose logging is helpful during debugging sessions but should stay off during regular runs to limit console noise.
@@ -207,14 +207,12 @@ To change defaults, edit config.py or app.py and rebuild/redeploy.
 - PII handling:
   - Regex-based and NER-based redaction may not catch 100% of edge cases
   - Validate outputs for your domain and compliance needs (e.g., HIPAA, GDPR)
-- Dependencies include PaddleOCR, Ghostscript (for Camelot), and Python libraries; keep them updated via image rebuilds
+- Dependencies include PaddleOCR, PyMuPDF, and Python libraries; keep them updated via image rebuilds
 - If exposing publicly, consider reverse proxy (TLS), auth, network policies, and resource limits
 
 ---
 
 ## Troubleshooting
-- Camelot errors
-  - Ensure Ghostscript and python3-tk are installed in the container/host
 - PaddleOCR import errors
   - Confirm paddlepaddle and paddleocr are installed; in containers rebuild the image to pull the deps
 - Mixed results on PDFs

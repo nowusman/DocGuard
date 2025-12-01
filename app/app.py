@@ -270,11 +270,13 @@ if process_btn and uploaded_files and size_ok and (anonymize or remove_pii or ex
                     content_size = len(content.encode('utf-8'))
                 else:
                     content_size = 0
+                metadata = pf.get("metadata") or {}
                 summary_data.append({
                     "Original File": pf["original_name"],
                     "Processed File": pf["name"],
                     "Output Format": pf["file_extension"],
-                    "Size (KB)": round(content_size / 1024, 2) if content_size else "N/A"
+                    "Size (KB)": round(content_size / 1024, 2) if content_size else "N/A",
+                    "Cache": "Yes" if metadata.get("cache_hit") else "No",
                 })
             st.dataframe(pd.DataFrame(summary_data), use_container_width=True, hide_index=True)
 
