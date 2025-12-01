@@ -149,7 +149,7 @@ with col3:
     extract_json = st.checkbox("🧾 Extract to JSON", help="Extract document content to JSON format")
 
 # OCR toggle (default ON)
-ocr_enabled = st.toggle("🖼️ OCR for images (PDF/DOCX)", value=True, help="Extract text from images via Tesseract where present.")
+ocr_enabled = st.toggle("🖼️ OCR for images (PDF/DOCX)", value=True, help="Extract text from images via PaddleOCR with simple heuristics.")
 # Apply OCR setting for local processor contexts (workers get the override via options)
 OCR_CONFIG['enabled'] = bool(ocr_enabled)
 

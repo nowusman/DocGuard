@@ -6,30 +6,23 @@ import io
 import json
 import os
 import re
-import tempfile
 import html
 from collections import OrderedDict
 from concurrent.futures import ThreadPoolExecutor
 from copy import deepcopy
 from datetime import datetime
 
-import PyPDF2
 import fitz  # PyMuPDF
 import numpy as np
-import pandas as pd
-import pdfplumber
 import spacy
 import zipfile
 import xml.etree.ElementTree as ET
 from PIL import Image as PILImage, ImageStat
 from docx import Document
-from docx.shared import Inches
 from reportlab.lib import colors
 from reportlab.lib.pagesizes import letter
-from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
-from reportlab.lib.units import inch
-from reportlab.pdfbase import pdfmetrics
-from reportlab.pdfbase.ttfonts import TTFont
+from reportlab.lib.styles import getSampleStyleSheet
+from reportlab.lib.utils import ImageReader
 from reportlab.platypus import Image, Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
 from time import perf_counter
 
@@ -70,12 +63,6 @@ class DocumentProcessor:
         
         # Check OCR availability
         self.ocr_available = self._check_ocr_availability()
-        
-        # Check the availability of the table extraction library
-        self.table_extraction_available = self._check_table_extraction_availability()
-
-        self.pdfplumber_available = self._check_pdfplumber()
-        self.pymupdf_available = self._check_pymupdf()
 
     def _log(self, message: str):
         if self.verbose_logging:
@@ -173,20 +160,6 @@ class DocumentProcessor:
         except Exception as exc:
             print(f"Warning: PaddleOCR initialization failed: {exc}")
             self._paddle_ocr = None
-            return False
-    
-    def _check_table_extraction_availability(self):
-        """
-        Check the availability of the table extraction library
-        """
-        try:
-            import camelot
-            return True
-        except ImportError:
-            print("Warning: Camelot not available. PDF table extraction will be limited.")
-            return False
-        except Exception as e:
-            print(f"Warning: Camelot initialization failed: {e}")
             return False
     
     def process_document(self, file_content, filename, anonymize=False, remove_pii=False, extract_json=False, options=None):
@@ -356,77 +329,15 @@ class DocumentProcessor:
         self._record_timing('read_docx', perf_counter() - start_time)
         return content, metadata
     
-    def _read_pdf_fallback(self, file_content):
-        """Read PDF file"""
-        start_time = perf_counter()
-        pdf_file = io.BytesIO(file_content)
-        pdf_reader = PyPDF2.PdfReader(pdf_file)
-        text_chunks = []
-        tables_data = []
-        images_data = []
-        
-        # Save PDF to temporary file for table extraction
-        temp_pdf_path = None
-        try:
-            with tempfile.NamedTemporaryFile(suffix='.pdf', delete=False) as temp_pdf:
-                temp_pdf.write(file_content)
-                temp_pdf_path = temp_pdf.name
-            
-            for page_num, page in enumerate(pdf_reader.pages):
-                page_text = page.extract_text()
-                if page_text:
-                    text_chunks.append(page_text)
-            
-            if not self.throughput_mode:
-                tables_start = perf_counter()
-                tables_data = self._extract_tables_from_pdf(temp_pdf_path)
-                self._record_timing('table_extraction', perf_counter() - tables_start)
-            
-            # Extract images
-            try:
-                # images_data = self._extract_images_from_pdf(pdf_reader)
-                images_data = self.extract_images_with_pdfplumber_locations(temp_pdf_path)
-            except Exception as e:
-                print(f"Warning: Could not extract images from PDF: {e}")
-        
-        except Exception as e:
-            print(f"Error processing PDF: {e}")
-            # If the table extraction fails, go back to extracting only text
-            for page_num, page in enumerate(pdf_reader.pages):
-                page_text = page.extract_text()
-                if page_text:
-                    text_chunks.append(page_text)
-        
-        finally:
-            self._log(f"Clear temp file:{temp_pdf_path}")
-            # Clear temp files
-            if temp_pdf_path and os.path.exists(temp_pdf_path):
-                try:
-                    os.unlink(temp_pdf_path)
-                except:
-                    pass
-        
-        text = "\n".join(text_chunks)
-        metadata = {
-            'text_content': text,
-            'tables': tables_data,
-            'images': images_data,
-            'pdf_engine': 'pypdf2_fallback'
-        }
-        
-        self._record_timing('read_pdf', perf_counter() - start_time)
-        return text, metadata
-
 
     #############################3
     def _read_pdf(self, file_content):
-        """Entry point for PDF reads with PyMuPDF single-pass when available."""
-        if self.pymupdf_available:
-            try:
-                return self._read_pdf_optimized(file_content)
-            except Exception as exc:
-                self._log(f"PyMuPDF single-pass failed, falling back: {exc}")
-        return self._read_pdf_pdfplumber(file_content)
+        """Entry point for PDF reads with PyMuPDF single-pass."""
+        try:
+            return self._read_pdf_optimized(file_content)
+        except Exception as exc:
+            self._log(f"PyMuPDF single-pass failed, returning text-only fallback: {exc}")
+            return self._read_pdf_text_only(file_content)
 
     def _read_pdf_optimized(self, file_content):
         """Single-pass PDF extraction using PyMuPDF only."""
@@ -475,82 +386,32 @@ class DocumentProcessor:
         }
         self._record_timing('read_pdf', perf_counter() - read_start)
         return text, metadata
-
-
-    def _read_pdf_pdfplumber(self, file_content):
-        """Read PDF files and use pdfplumber to accurately filter headers and footers"""
-        read_start = perf_counter()
-        try:
-            import pdfplumber
-        except ImportError:
-            print("pdfplumber not available, falling back to PyPDF2")
-            return self._read_pdf_fallback(file_content)
-        
+    
+    def _read_pdf_text_only(self, file_content):
+        """Lightweight text-only fallback using PyMuPDF without tables/images."""
+        start_time = perf_counter()
         text_chunks = []
-        tables_data = []
-        images_data = []
-        
-        # Save PDF to temporary file
-        temp_pdf_path = None
+        file_bytes = bytes(file_content) if isinstance(file_content, (bytes, bytearray)) else str(file_content).encode('utf-8', errors='ignore')
         try:
-            with tempfile.NamedTemporaryFile(suffix='.pdf', delete=False) as temp_pdf:
-                temp_pdf.write(file_content)
-                temp_pdf_path = temp_pdf.name
-            
-            # Extracting Text with pdfplumber
-            with pdfplumber.open(temp_pdf_path) as pdf:
-                for page in pdf.pages:
-                    # 
-                    page_height = page.height
-                    # header_region = (0, 0, page.width, page_height * 0.1)  # 顶部10%
-                    # footer_region = (0, page_height * 0.9, page.width, page_height)  # 底部10%
-                    
-                    # Extract text from non header and footer areas
-                    # main_region = page.within_bbox((0, page_height * 0.1, page.width, page_height * 0.9))
-                    header_ratio = PDF_HEADER_RATIO
-                    main_region = page.within_bbox((0, page_height * header_ratio, page.width, page_height * (1 - header_ratio)))
-                    page_text = main_region.extract_text()
-                    
+            with fitz.open(stream=file_bytes, filetype="pdf") as pdf_doc:
+                for page in pdf_doc:
+                    try:
+                        page_text = page.get_text("text")
+                    except TypeError:
+                        page_text = page.get_text()
                     if page_text:
                         text_chunks.append(page_text)
-            
-            # Proportion extraction table (still using the original method)
-            if not self.throughput_mode:
-                tables_start = perf_counter()
-                tables_data = self._extract_tables_from_pdf(temp_pdf_path)
-                self._record_timing('table_extraction', perf_counter() - tables_start)
-            
-            # Extract images
-            # pdf_file = io.BytesIO(file_content)
-            # pdf_reader = PyPDF2.PdfReader(pdf_file)
-            try:
-                # images_data = self._extract_images_from_pdf(pdf_reader)
-                images_data = self.extract_images_with_pdfplumber_locations(temp_pdf_path)
-            except Exception as e:
-                print(f"Warning: Could not extract images from PDF: {e}")
-        
-        except Exception as e:
-            print(f"Error processing PDF with pdfplumber: {e}")
-            # back to old read_pdf
-            return self._read_pdf_fallback(file_content)
-        
-        finally:
-            self._log(f"Clear temp file:{temp_pdf_path}")
-            if temp_pdf_path and os.path.exists(temp_pdf_path):
-                try:
-                    os.unlink(temp_pdf_path)
-                except:
-                    pass
-        
+        except Exception as exc:
+            raise ValueError(f"Unable to read PDF with PyMuPDF: {exc}") from exc
+
         text = "\n".join(text_chunks)
         metadata = {
             'text_content': text,
-            'tables': tables_data,
-            'images': images_data
+            'tables': [],
+            'images': [],
+            'pdf_engine': 'pymupdf_text_only'
         }
-        
-        metadata['pdf_engine'] = 'pdfplumber'
-        self._record_timing('read_pdf', perf_counter() - read_start)
+        self._record_timing('read_pdf', perf_counter() - start_time)
         return text, metadata
 
     #############################3
@@ -623,185 +484,6 @@ class DocumentProcessor:
             images.append(image_info)
         return images
 
-    def _extract_tables_from_pdf(self, pdf_path):
-        """
-        Extract Tables from PDF - Using Camelot
-        """
-        if self.throughput_mode:
-            return []
-
-        tables_data = []
-        
-        if not self.table_extraction_available:
-            print("Table extraction not available. Install camelot-py for PDF table extraction.")
-            return tables_data
-        
-        try:
-            import camelot
-            
-            # # 尝试使用stream模式（基于文本的表格）
-            # try:
-            #     tables_stream = camelot.read_pdf(pdf_path, flavor='stream', pages='all')
-            #     print(f"Found {len(tables_stream)} tables using stream method")
-                
-            #     for i, table in enumerate(tables_stream):
-            #         table_data = self._process_camelot_table(table, i, 'stream')
-            #         if table_data:
-            #             tables_data.append(table_data)
-            # except Exception as e:
-            #     print(f"Stream table extraction failed: {e}")
-            
-            # 尝试使用lattice模式（基于线的表格）
-            try:
-                tables_lattice = camelot.read_pdf(pdf_path, flavor='lattice', pages='all')
-                self._log(f"Found {len(tables_lattice)} tables using lattice method")
-                
-                for i, table in enumerate(tables_lattice):
-                    # Check if this table has already been extracted (to avoid duplication)
-                    if not self._is_table_duplicate(table, tables_data):
-                        table_data = self._process_camelot_table(table, i + len(tables_data), 'lattice')
-                        if table_data:
-                            tables_data.append(table_data)
-            except Exception as e:
-                print(f"Lattice table extraction failed: {e}")
-            
-            # If neither way finds the table, try using simple text analysis
-            if not tables_data:
-                tables_data = self._extract_tables_from_text(pdf_path)
-            
-        except Exception as e:
-            print(f"Error extracting tables from PDF: {e}")
-            # Going back to simple text analysis
-            tables_data = self._extract_tables_from_text(pdf_path)
-        
-        return tables_data
-    
-    def _process_camelot_table(self, table, table_index, method):
-        """
-        Processing Camelot extracted tables
-        """
-        try:
-            df = table.df
-            
-            table_data = []
-            for _, row in df.iterrows():
-                table_data.append(row.tolist())
-            
-            accuracy = table.accuracy
-            whitespace = table.whitespace
-            order = table.order
-            page = table.page
-            
-            table_info = {
-                'table_index': table_index,
-                'data': table_data,
-                # 'method': method,
-                # 'accuracy': accuracy,
-                # 'whitespace': whitespace,
-                'order': order,
-                'page': page,
-                'shape': df.shape
-                # ,
-                # 'extraction_method': 'camelot'
-            }
-            
-            return table_info
-            
-        except Exception as e:
-            print(f"Error processing Camelot table {table_index}: {e}")
-            return None
-    
-    def _is_table_duplicate(self, new_table, existing_tables):
-        """
-        Check if the table is duplicated
-        """
-        if not existing_tables:
-            return False
-        
-        new_data = new_table.df.values.tolist()
-        
-        for existing_table in existing_tables:
-            existing_data = existing_table.get('data', [])
-            
-            if len(new_data) == len(existing_data) and len(new_data) > 0:
-                if len(new_data[0]) == len(existing_data[0]):
-                    match_count = 0
-                    for i in range(min(3, len(new_data))):
-                        if new_data[i] == existing_data[i]:
-                            match_count += 1
-                    
-                    if match_count >= 2:  
-                        return True
-        
-        return False
-    
-    def _extract_tables_from_text(self, pdf_path):
-        """
-        Extracting Tables from PDF Text
-        """
-        tables_data = []
-        
-        try:
-            # Extracting Text with PyPDF2
-            with open(pdf_path, 'rb') as file:
-                pdf_reader = PyPDF2.PdfReader(file)
-                text_chunks = []
-                
-                for page_num, page in enumerate(pdf_reader.pages):
-                    page_text = page.extract_text()
-                    if page_text:
-                        text_chunks.append(page_text)
-                
-                lines = "\n".join(text_chunks).split('\n')
-                current_table = []
-                in_table = False
-                
-                for i, line in enumerate(lines):
-                    line_stripped = line.strip()
-                    
-                    # Heuristic rules for table detection:
-                    # 1. Contains multiple consecutive spaces or tabs
-                    # 2. Contains multiple vertical characters
-                    # 3. Similar line length
-                    
-                    if re.search(r'(\s{2,}.*){3,}', line) or '|' in line:
-                        if not in_table:
-                            in_table = True
-                            current_table = []
-                        
-                        if '|' in line:
-                            row_data = [cell.strip() for cell in line.split('|')]
-                        else:
-                            row_data = [cell.strip() for cell in re.split(r'\s{2,}', line) if cell.strip()]
-                        
-                        current_table.append(row_data)
-                    else:
-                        if in_table and len(current_table) >= 2:  
-                            table_info = {
-                                'table_index': len(tables_data),
-                                'data': current_table,
-                                'method': 'text_analysis',
-                                'extraction_method': 'text_heuristic'
-                            }
-                            tables_data.append(table_info)
-                        
-                        in_table = False
-                        current_table = []
-                
-                # Last table
-                if in_table and len(current_table) >= 2:
-                    table_info = {
-                        'table_index': len(tables_data),
-                        'data': current_table,
-                        'method': 'text_analysis',
-                        'extraction_method': 'text_heuristic'
-                    }
-                    tables_data.append(table_info)
-            
-        except Exception as e:
-            print(f"Error extracting tables from text: {e}")
-        
-        return tables_data
     
     def _apply_anonymization(self, content, file_extension, original_content):
         """Application anonymization processing - only for TXT and PDF"""
@@ -1037,7 +719,6 @@ class DocumentProcessor:
         """
         start_time = perf_counter()
         try:
-            temp_img_path_arr = []
             pdf_buffer = io.BytesIO()
             
             doc = SimpleDocTemplate(
@@ -1140,64 +821,23 @@ class DocumentProcessor:
                 
                 image_count = 0
                 for img_data in images:
-                    # if image_count >= 3:  # 只显示前3张图片，避免PDF过大
-                    #     story.append(Paragraph(f"... and {len(images) - 3} more images", normal_style))
-                    #     break
-                    
-                    if 'image_data' in img_data:
-                        try:
-                            # remove stc logo
-                            extracted_text = img_data.get('extracted_text', '')
-                            self._log(extracted_text)
-                            if extracted_text and extracted_text.lower() in ["stc","sic"]:
-                                continue
+                    image_bytes = img_data.get('image_data')
+                    if not image_bytes:
+                        continue
+                    extracted_text = (img_data.get('extracted_text') or '').strip().lower()
+                    if extracted_text in {"stc", "sic"}:
+                        continue
 
-                            # Create temporary image file
-                            # print(img_data['image_data'])
-                            with tempfile.NamedTemporaryFile(suffix='.png', delete=False) as temp_img:
-                                temp_img.write(img_data['image_data'])
-                                temp_img_path = temp_img.name
-                                temp_img_path_arr.append(temp_img_path)
-                            
-                            # Verify if the image file is valid
-                            if not os.path.exists(temp_img_path) or os.path.getsize(temp_img_path) == 0:
-                                self._log(f"Invalid temporary image file: {temp_img_path}")
-                                continue
-
-                            # Use secure image loading methods
-                            img = self._safe_load_image(temp_img_path, width=400, height=300)
-                            if img:
-                                story.append(img)
-                                story.append(Spacer(1, 6))
-                                story.append(Spacer(1, 12))
-                                image_count += 1
-                            else:
-                                self._log(f"Failed to load image: {temp_img_path}")
-                            
-                            # # 添加图片到PDF
-                            # img = Image(temp_img_path, width=400, height=300)
-                            # story.append(img)
-                            # story.append(Spacer(1, 6))
-                            
-                            # # # 添加图片描述
-                            # # description = img_data.get('description', f'Image {image_count + 1}')
-                            # # extracted_text = img_data.get('extracted_text', '')
-                            # # if extracted_text and len(extracted_text) > 200:
-                            # #     extracted_text = extracted_text[:200] + "..."
-                            
-                            # # story.append(Paragraph(f"Description: {description}", normal_style))
-                            # # if extracted_text:
-                            # #     story.append(Paragraph(f"OCR Text: {extracted_text}", normal_style))
-                            # story.append(Spacer(1, 12))
-                            
-                            # image_count += 1
-                            
-                            # 清理临时文件
-                            # os.unlink(temp_img_path)
-                            
-                        except Exception as img_error:
-                            print(f"Error adding image to PDF: {img_error}")
-                            continue
+                    try:
+                        reader = ImageReader(io.BytesIO(image_bytes))
+                        img = Image(reader, width=400, height=300)
+                        story.append(img)
+                        story.append(Spacer(1, 6))
+                        story.append(Spacer(1, 12))
+                        image_count += 1
+                    except Exception as img_error:
+                        self._log(f"Error adding image to PDF: {img_error}")
+                        continue
             
             # Build PDF
             doc.build(story)
@@ -1212,43 +852,8 @@ class DocumentProcessor:
             # If the creation fails, go back to simple PDF creation
             return self._create_pdf(content, filename)
         finally:
-            for path in temp_img_path_arr:
-                os.unlink(path)
-                # print(f"Clear temp image:{path}")
             self._record_timing('pdf_generation_layout', perf_counter() - start_time)
     
-    def _safe_load_image(self, image_path, width=400, height=300):
-        """
-        Use secure image loading methods
-        """
-        try:
-            if not os.path.exists(image_path):
-                self._log(f"Image file not found: {image_path}")
-                return None
-            
-            file_size = os.path.getsize(image_path)
-            if file_size == 0:
-                self._log(f"Image file is empty: {image_path}")
-                return None
-            
-            # Verify images using PIL
-            try:
-                from PIL import Image as PILImage
-                with PILImage.open(image_path) as img:
-                    img.verify()  # 验证图片完整性
-            except ImportError:
-                self._log("PIL not available, skipping image verification")
-            except Exception as pil_error:
-                self._log(f"Image verification failed: {pil_error}")
-                return None
-            
-            img = Image(image_path, width=width, height=height)
-            return img
-            
-        except Exception as e:
-            print(f"Error in _safe_load_image for {image_path}: {e}")
-            return None
-        
     def _create_pdf(self, content, filename):
         """
         Create simple PDF file
@@ -1375,97 +980,6 @@ class DocumentProcessor:
                         })
         except Exception as e:
             print(f"Error processing DOCX images: {e}")
-        
-        return self._process_images_with_ocr(images_data)
-    
-    def _extract_images_from_pdf(self, pdf_reader):
-        """
-        Extract image information from PDF
-        """
-        images_data = []
-        
-        try:
-            for page_num in range(len(pdf_reader.pages)):
-                page = pdf_reader.pages[page_num]
-                
-                if not hasattr(page, 'get'):
-                    continue
-                    
-                resources = page.get('/Resources')
-                if not resources:
-                    continue
-                
-                if not hasattr(resources, 'get'):
-                    continue    
-                xObject = resources.get('/XObject')
-                if not xObject:
-                    continue
-                
-                try:
-                    xObject_dict = xObject.get_object() if hasattr(xObject, 'get_object') else xObject
-                except:
-                    continue
-                
-                for obj_name, obj in xObject_dict.items():
-                    try:
-                        if hasattr(obj, 'get_object'):
-                            obj = obj.get_object()
-                        
-                        if not hasattr(obj, 'get'):
-                            continue
-                            
-                        subtype = obj.get('/Subtype')
-                        if subtype != '/Image':
-                            continue
-                            
-                        # 获取图像数据
-                        # obj._data
-                        # print("obj._data ok")
-                        # with tempfile.NamedTemporaryFile(suffix='.txt', delete=False) as temp_img:
-                        #     temp_img.write(obj._data)
-                        # obj.get_data()
-                        # print("obj.get_data() ok")
-                        # with tempfile.NamedTemporaryFile(suffix='.txt', delete=False) as temp_img:
-                        #     temp_img.write(obj.get_data())
-                        
-                        if hasattr(obj, '_data'):
-                            image_data = obj._data
-                        elif hasattr(obj, 'get_data'):
-                            image_data = obj.get_data()
-                        else:
-                            try:
-                                import struct
-                                if hasattr(obj, 'stream'):
-                                    image_data = obj.stream.get_data()
-                                else:
-                                    continue
-                            except:
-                                continue
-                        
-                        image_info = {
-                            "page": page_num + 1,
-                            "type": "pdf_embedded_image",
-                            "description": f"Image on page {page_num + 1}",
-                            "image_data": image_data,
-                            "image_format": self._get_image_format(image_data),
-                            "extracted_text": "",
-                            "ocr_applied": False,
-                        }
-                        images_data.append(image_info)
-                        
-                    except Exception as e:
-                        print(f"Error extracting PDF image {obj_name}: {e}")
-                        images_data.append({
-                            "page": page_num + 1,
-                            "type": "pdf_embedded_image",
-                            "description": f"Image on page {page_num + 1} (extraction failed)",
-                            "extracted_text": f"[Image extraction failed: {str(e)}]",
-                            "ocr_applied": False,
-                            "image_data": b"",
-                        })
-                        
-        except Exception as e:
-            print(f"Error processing PDF images: {e}")
         
         return self._process_images_with_ocr(images_data)
     
@@ -1666,148 +1180,12 @@ class DocumentProcessor:
         # remove stc logo
         rtn_images = []
         for image in images_info:
-            if image.get("extracted_text").lower() in ["stc","sic"]:
+            text_value = (image.get("extracted_text") or "").lower()
+            if text_value in ["stc", "sic"]:
                 continue
             rtn_images.append(image)
 
         return rtn_images
-    
-    def _extract_tables(self, content):
-        """Extract Table Data - From Text Content"""
-        if isinstance(content, bytes):
-            content = content.decode('utf-8', errors='ignore')
-            
-        tables = []
-        lines = content.split('\n')
-        current_table = []
-        
-        for line in lines:
-            if '|' in line:  # Simple table detection
-                current_table.append([cell.strip() for cell in line.split('|')])
-            elif current_table:
-                tables.append(current_table)
-                current_table = []
-        
-        if current_table:
-            tables.append(current_table)
-        
-        return tables
-    
-    def _extract_sections(self, content):
-        """Extract document sections"""
-        if isinstance(content, bytes):
-            content = content.decode('utf-8', errors='ignore')
-            
-        sections = []
-        lines = content.split('\n')
-        
-        for i, line in enumerate(lines):
-            line_stripped = line.strip()
-            if (len(line_stripped) > 0 and 
-                (line_stripped.isupper() or 
-                 line_stripped.startswith('#') or 
-                 line_stripped.startswith('Chapter') or
-                 line_stripped.startswith('Section') or
-                 (len(line_stripped) < 100 and i > 0 and len(lines[i-1].strip()) == 0))):
-                
-                content_start = i + 1
-                content_preview = ""
-                preview_lines = 0
-                while content_start < len(lines) and preview_lines < 3:
-                    if lines[content_start].strip():
-                        content_preview += lines[content_start].strip() + " "
-                        preview_lines += 1
-                    content_start += 1
-                
-                sections.append({
-                    "title": line_stripped,
-                    "content_preview": content_preview.strip(),
-                    "position": i
-                })
-        
-        return sections[:20]
-
-##########################
-
-    def _check_pdfplumber(self):
-        try:
-            import pdfplumber
-            return True
-        except ImportError:
-            print("pdfplumber not available. Install with: pip install pdfplumber")
-            return False
-    
-    def _check_pymupdf(self):
-        try:
-            import fitz
-            return True
-        except ImportError:
-            print("PyMuPDF not available. Install with: pip install PyMuPDF")
-            return False
-
-    def extract_images_with_pdfplumber_locations(self, pdf_path):
-        """
-        Use pdfplumber to locate images, and then extract them using PyMuPDF
-        Return a list containing image data and location information
-        """
-        if not self.pdfplumber_available or not self.pymupdf_available:
-            print("Required libraries not available")
-            return []
-        
-        images_data = []
-        
-        try:
-            # Using pdfplumber to obtain image location information
-            with pdfplumber.open(pdf_path) as pdf:
-                # Open the same PDF using PyMuPDF for image extraction
-                pymupdf_doc = fitz.open(pdf_path)
-                
-                for page_num, page in enumerate(pdf.pages):
-                    ###
-                    page_height = page.height
-                    header_ratio = PDF_HEADER_RATIO
-                    page = page.within_bbox((0, page_height * header_ratio, page.width, page_height * (1 - header_ratio)))
-                    
-                    if hasattr(page, 'images') and page.images:
-                        for img_idx, img_info in enumerate(page.images):
-                            try:
-                                # Obtain image position and bounding box information
-                                bbox = (img_info['x0'], img_info['top'], 
-                                       img_info['x1'], img_info['bottom'])
-                                
-                                # print(f"Page {page_num+1}, Image {img_idx+1}: bbox {bbox}")
-                                
-                                # Extracting actual image data using PyMuPDF
-                                pix = self._extract_image_with_pymupdf(
-                                    pymupdf_doc, page_num, img_idx, bbox
-                                )
-                                
-                                if pix:
-                                    image_bytes = pix.tobytes("png")
-                                    
-                                    image_info = {
-                                        "page": page_num + 1,
-                                        "type": "pdf_embedded_image",
-                                        "description": f"Image on page {page_num + 1}",
-                                        "image_data": image_bytes,
-                                        "image_format": self._get_image_format(image_bytes),
-                                        "extracted_text": "",
-                                        "ocr_applied": False,
-                                    }
-
-                                    images_data.append(image_info)
-                                    pix = None  # Clear memory
-                                    
-                            except Exception as e:
-                                print(f"Error processing image {img_idx} on page {page_num}: {e}")
-                                continue
-                
-                pymupdf_doc.close()
-                        
-        except Exception as e:
-            print(f"Error extracting images with pdfplumber locations: {e}")
-        
-        return self._process_images_with_ocr(images_data)
 
     def _extract_image_with_pymupdf(self, doc, page_num, img_idx, bbox=None, xref=None):
         """Extract an image region or direct xref using PyMuPDF."""
