@@ -26,7 +26,6 @@ from reportlab.lib.utils import ImageReader
 from reportlab.platypus import Image, Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
 from time import perf_counter
 
-import config
 from config import (
     PII_PATTERNS,
     JSON_SCHEMA,
@@ -53,13 +52,10 @@ class DocumentProcessor:
         self._cache = OrderedDict()
         self._paddle_ocr = None
         self.ocr_engine = OCR_ENGINE
-        self.default_anonymize_terms = self._normalize_anonymization_terms(
-            getattr(config, "ANONYMIZE_TERMS", ["stc"])
-        )
-        default_replace = getattr(config, "ANONYMIZE_REPLACE", "sss")
-        self.default_anonymize_replace = str(default_replace) if default_replace is not None else ""
-        self.anonymize_terms = list(self.default_anonymize_terms)
-        self.anonymize_replace = self.default_anonymize_replace
+        self.default_anonymize_terms = []
+        self.default_anonymize_replace = ""
+        self.anonymize_terms = []
+        self.anonymize_replace = ""
         # Load spaCy model
         try:
             self.nlp = spacy.load("en_core_web_sm")
@@ -516,8 +512,8 @@ class DocumentProcessor:
 
     def _set_anonymization_settings(self, terms_override, replace_override):
         """Apply per-request anonymization overrides with config defaults."""
-        terms_source = terms_override if terms_override is not None else self.default_anonymize_terms
-        replacement_source = replace_override if replace_override is not None else self.default_anonymize_replace
+        terms_source = terms_override if terms_override is not None else []
+        replacement_source = replace_override if replace_override is not None else ""
         self.anonymize_terms = self._normalize_anonymization_terms(terms_source)
         self.anonymize_replace = "" if replacement_source is None else str(replacement_source)
 

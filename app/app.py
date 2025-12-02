@@ -291,13 +291,13 @@ with st.expander("Advanced options"):
 with st.expander("⚙️ Anonymization Settings"):
     anonymize_terms_input = st.text_area(
         "Terms to Anonymize (one per line)",
-        value="stc",
-        help="comma separated strings to be find and replaced (case insensitive)",
+        value="",
+        help="One per line or comma-separated; case-insensitive; duplicates removed.",
     )
     anonymize_replace_input = st.text_input(
         "Replacement string",
-        value="sss",
-        help="Replacement string, keep it empty to replace with a space",
+        value="[REDACTED]",
+        help="Replacement string; leave empty to replace with a single space",
     )
 
 parsed_anonymize_terms = _parse_anonymize_terms_input(anonymize_terms_input)
@@ -452,8 +452,8 @@ if st.session_state["processing_started"] or st.session_state["processing_done"]
                 "Throughput mode": batch_opts.get("throughput_mode", False),
                 "Verbose logging": batch_opts.get("verbose_logging", False),
                 "OCR enabled": batch_opts.get("ocr_enabled", False),
-                "Anonymize terms": parsed_anonymize_terms,
-                "Anonymize replace": anonymize_replace_input if anonymize_replace_input != "" else " ",
+                "Anonymize terms (effective)": parsed_anonymize_terms,
+                "Anonymize replace (effective)": anonymize_replace_input if anonymize_replace_input != "" else " ",
             })
 
             if processed_files and processed_files[0].get("metadata"):
