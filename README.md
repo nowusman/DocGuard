@@ -10,7 +10,6 @@
   <a href="#"><img src="https://img.shields.io/badge/streamlit-1.50.0-FF4B4B.svg" alt="Streamlit" /></a>
   <a href="#"><img src="https://img.shields.io/badge/docker-ready-2496ED.svg" alt="Docker" /></a>
   <a href="#"><img src="https://img.shields.io/badge/license-MIT-green.svg" alt="License" /></a>
-  <a href="#"><img src="https://img.shields.io/badge/status-production--ready-success.svg" alt="Status" /></a>
 </p>
 
 <p align="center">
