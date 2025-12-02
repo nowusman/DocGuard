@@ -246,7 +246,7 @@ docker-compose logs -f frontend
 cd app
 
 # Build image
-docker build -t docguard:latest .
+docker build -t docguard:latest /app
 
 # Run container
 docker run -d \
@@ -1135,8 +1135,8 @@ DocGuard/
     ├── document_processor.py   # Core processing logic
     ├── config.py               # Configuration management
     ├── requirements.txt        # Python dependencies
-    ├── Dockerfile              # Container build instructions
-    ├── .dockerignore           # Docker build exclusions
+    ├── app/Dockerfile              # Container build instructions
+    ├── app/.dockerignore           # Docker build exclusions
     ├── styles.css              # Custom UI styling
     └── .streamlit/
         └── config.toml         # Streamlit configuration
