@@ -342,6 +342,8 @@ if process_btn and uploaded_files and size_ok and (anonymize or remove_pii or ex
             "throughput_mode": throughput_mode,
             "verbose_logging": verbose_logging,
             "ocr_enabled": bool(ocr_enabled),
+            "anonymize_terms": parsed_anonymize_terms,
+            "anonymize_replace": anonymize_replace_input,
         }
         st.session_state["processing_batch_options"] = batch_options_snapshot
         st.session_state["job_operations"] = []
@@ -442,6 +444,10 @@ if st.session_state["processing_started"] or st.session_state["processing_done"]
                 "Ops": ", ".join(ops_list) if ops_list else "None",
             })
         st.dataframe(pd.DataFrame(summary_data), use_container_width=True, hide_index=True)
+        effective_terms = batch_opts.get("anonymize_terms", parsed_anonymize_terms)
+        _replace_raw = batch_opts.get("anonymize_replace", anonymize_replace_input)
+        effective_replace = _replace_raw if _replace_raw != "" else " "
+
 
         with st.expander("Processing Details"):
             st.write("**Applied Processing Options:**")
@@ -452,8 +458,8 @@ if st.session_state["processing_started"] or st.session_state["processing_done"]
                 "Throughput mode": batch_opts.get("throughput_mode", False),
                 "Verbose logging": batch_opts.get("verbose_logging", False),
                 "OCR enabled": batch_opts.get("ocr_enabled", False),
-                "Anonymize terms (effective)": parsed_anonymize_terms,
-                "Anonymize replace (effective)": anonymize_replace_input if anonymize_replace_input != "" else " ",
+                "Anonymize terms (effective)": effective_terms,
+                "Anonymize replace (effective)": effective_replace,
             })
 
             if processed_files and processed_files[0].get("metadata"):
