@@ -169,7 +169,7 @@ open http://localhost:8501
 │                    Configuration Layer                      │
 │                      (app/config.py)                        │
 │                                                             │
-│  • ANONYMIZE_TERMS     • PII_PATTERNS    • OCR_CONFIG       │
+│  • Runtime UI options  • PII_PATTERNS    • OCR_CONFIG       │
 │  • PDF_HEADER_RATIO    • JSON_SCHEMA     • Feature Flags    │
 └─────────────────────────────────────────────────────────────┘
 ```
@@ -344,21 +344,11 @@ VERBOSE_LOGGING=false           # Enable detailed console output
 
 | File | Purpose |
 |------|---------|
-| `app/config.py` | Core configuration: anonymization terms, PII patterns, OCR settings, limits |
+| `app/config.py` | Core configuration: PII patterns, OCR settings, limits, feature flags |
 | `.env` | Runtime overrides for feature flags and performance tuning |
 | `app/.streamlit/config.toml` | Streamlit-specific UI configuration |
 
 ### Key Configuration Options
-
-#### Anonymization (`config.py`)
-
-```python
-# Terms to anonymize (case-insensitive)
-ANONYMIZE_TERMS = ["STC", "Confidential", "Internal"]
-
-# Replacement text
-ANONYMIZE_REPLACE = "[REDACTED]"
-```
 
 #### PII Patterns (`config.py`)
 
@@ -414,16 +404,11 @@ PDF_HEADER_RATIO = 0.08          # Skip top/bottom 8% of PDF pages
 
 #### 1. Anonymization
 
-Replaces configured terms with `[REDACTED]` (case-insensitive):
-
-```python
-# Configure in config.py
-ANONYMIZE_TERMS = ["CompanyName", "ProjectCode", "Confidential"]
-```
+Configured at runtime in the UI under **⚙️ Anonymization Settings**. Terms are case-insensitive; duplicates are removed; empty replacement turns into a single space.
 
 **Example:**
 - Input: `"CompanyName released ProjectCode in 2024"`
-- Output: `"[REDACTED] released [REDACTED] in 2024"`
+- Output: `"  released   in 2024"` (with blank replacement) or custom replacement text
 
 #### 2. PII Removal
 
@@ -1208,7 +1193,7 @@ pytest --cov=app --cov-report=html
 ### Adding New Features
 
 1. **PII Patterns**: Add to `PII_PATTERNS` in `config.py`
-2. **Anonymization Terms**: Extend `ANONYMIZE_TERMS` in `config.py`
+2. **Anonymization Terms**: Configure via the Streamlit UI (⚙️ Anonymization Settings)
 3. **OCR Languages**: Add to `OCR_CONFIG['languages']` and install language packs
 4. **File Formats**: Extend `supported_formats` in `document_processor.py`
 5. **Output Formats**: Modify JSON schema in `JSON_SCHEMA` in `config.py`
