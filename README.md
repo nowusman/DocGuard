@@ -59,7 +59,7 @@ The design goals are:
 - In-session caching skips re-processing duplicate inputs (LRU per worker)
 - Built-in constraints:
   - 20MB per file max, 100MB total batch max (configurable in code)
-- Parallel processing with live per-file status (ProcessPoolExecutor)
+- Parallel processing with live per-file status (ProcessPoolExecutor + background queue to keep the UI responsive)
 - Advanced options expander exposes throughput mode, verbose logging, and timing details for the first processed file
 
 ---
@@ -179,6 +179,7 @@ To change defaults, edit config.py or app.py and rebuild/redeploy.
   - Enable throughput mode to skip OCR/tables and favor regex-only PII
   - Toggle verbose logging for debugging
   - Inspect the new Processing Details expander to see timing metrics for the first processed file
+  - Processing Details also shows the active NER mode (spaCy batch vs regex-only fast path)
 
 ---
 

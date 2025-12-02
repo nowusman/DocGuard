@@ -245,12 +245,13 @@ Phase 4 — Caching layer (TIER 2) (0.5 day) — **Status: ✅ Completed (per-wo
   - Duplicate work within a session is skipped; memory bounded by max cache items
 
 
-Phase 5 — Async UI with background worker (TIER 2) (1 day)
+Phase 5 — Async UI with background worker (TIER 2) (1 day) — **Status: ✅ Completed (background thread + queue-driven status UI)**
 - Goals
   - Decouple UI from processing to avoid blocking Streamlit interactions
 - Development (app.py)
-  - Introduce a lightweight background thread with Queue collecting per‑file results while ProcessPool handles CPU work
+  - Introduce a lightweight background thread with Queue collecting per-file results while ProcessPool handles CPU work
   - Stream updates: as_completed loop puts results into Queue; UI consumes and updates progress table
+- Completed items: Background thread streams ProcessPool results into a queue; UI polls and renders queued/running/done/error status rows without blocking the Streamlit thread
 - Frontend
   - Live progress list with statuses: queued, running, done, error
 - Testing
@@ -265,9 +266,9 @@ Phase 5 — Async UI with background worker (TIER 2) (1 day)
   - UI remains interactive during processing; partial results appear as they finish
 
 
-Phase 6 — spaCy and PII pipeline optimization (TIER 2) (1 day)
+Phase 6 — spaCy and PII pipeline optimization (TIER 2) (1 day) — **Status: ✅ Completed (regex-only fast mode + batched spaCy NER)**
 - Goals
-  - 2–6× faster NER on many small chunks via batching; regex‑only fast mode
+  - 2–6× faster NER on many small chunks via batching; regex-only fast mode
   - Reduce spaCy overhead by disabling unused pipeline components
 - Development (document_processor.py)
   - **Load spaCy model**:
@@ -296,6 +297,7 @@ Phase 6 — spaCy and PII pipeline optimization (TIER 2) (1 day)
     - Add _remove_pii_fast(text) method that uses only PII_PATTERNS regexes
     - Trade-off: faster but may miss context-dependent entities (e.g., names without obvious patterns)
   - **Precompile all regex patterns** in config.py (already in Phase 0, ensure reuse here)
+- Completed items: Regex-only fast path when throughput mode is enabled; batched spaCy NER with nlp.pipe for DOCX/TXT paths; centralized PII redaction helpers and metadata flag for NER mode
 - Frontend
   - "Max throughput mode" checkbox already maps to THROUGHPUT_MODE → fast mode
   - Show "NER mode: spaCy batch" or "NER mode: regex-only" in Processing Details

@@ -120,6 +120,7 @@ class DocumentProcessor:
         metadata['timing'] = dict(self._timing)
         metadata['throughput_mode'] = self.throughput_mode
         metadata['cache_hit'] = metadata.get('cache_hit', False)
+        metadata['ner_mode'] = 'regex_only' if (self.throughput_mode or not self.nlp) else 'spacy_batch'
         metadata['ocr'] = {
             'engine': self.ocr_engine if self.ocr_available else 'unavailable',
             'images_processed': self._ocr_images_processed,
@@ -485,22 +486,72 @@ class DocumentProcessor:
         return images
 
     
+    def _apply_anonymization_terms(self, text: str) -> str:
+        """Apply configured anonymization terms to a text snippet."""
+        anonymized_content = text
+        for term in ANONYMIZE_TERMS:
+            anonymized_content = re.sub(
+                re.escape(term),
+                ANONYMIZE_REPLACE,
+                anonymized_content,
+                flags=re.IGNORECASE
+            )
+        return anonymized_content
+
     def _apply_anonymization(self, content, file_extension, original_content):
         """Application anonymization processing - only for TXT and PDF"""
         
         if isinstance(content, bytes):
             content = content.decode('utf-8')
             
-        anonymized_content = content
-        for term in ANONYMIZE_TERMS:
-            anonymized_content = re.sub(
-                re.escape(term), 
-                ANONYMIZE_REPLACE, 
-                anonymized_content, 
-                flags=re.IGNORECASE
-            )
+        return self._apply_anonymization_terms(content)
+    
+    def _remove_pii_fast(self, content: str) -> str:
+        """Regex-only PII removal for fast mode or as a preprocessing step."""
+        pii_removed_content = content
+        for pattern in PII_PATTERNS.values():
+            pii_removed_content = pattern.sub('[PII_REMOVED]', pii_removed_content)
+        return pii_removed_content
+    
+    def _apply_spacy_entities_batch(self, texts):
+        """Apply spaCy entity redaction in batch for PERSON/ORG/GPE."""
+        if not texts:
+            return []
+        if not self.nlp:
+            return [self._remove_pii_fast(text) for text in texts]
+
+        redacted = []
+        for doc, original in zip(self.nlp.pipe(texts, batch_size=50, n_process=1), texts):
+            updated = original
+            for ent in doc.ents:
+                if ent.label_ in ['PERSON', 'ORG', 'GPE']:
+                    updated = updated.replace(ent.text, '[PII_REMOVED]')
+            redacted.append(updated)
+        return redacted
+
+    def _process_text_batch(self, texts, operation):
+        """Process a list of text snippets in batch using regex + spaCy pipe."""
+        processed = []
+        if operation == 'anonymize':
+            return [self._apply_anonymization_terms(text) for text in texts]
+
+        if operation == 'remove_pii':
+            regex_only = [self._remove_pii_fast(text) for text in texts]
+            if self.throughput_mode or not self.nlp:
+                return regex_only
+            return self._apply_spacy_entities_batch(regex_only)
+
+        return texts
+
+    def _apply_text_to_paragraph(self, paragraph, new_text: str):
+        """Replace paragraph content with processed text while keeping styling simple."""
+        for run in paragraph.runs:
+            run.text = ""
         
-        return anonymized_content
+        if paragraph.runs:
+            paragraph.runs[0].text = new_text
+        else:
+            paragraph.add_run(new_text)
     
     def _remove_pii(self, content, file_extension, original_content):
         """Remove PII information - for TXT and PDF only"""
@@ -509,38 +560,13 @@ class DocumentProcessor:
         if isinstance(content, bytes):
             content = content.decode('utf-8')
             
-        pii_removed_content = content
+        regex_cleaned = self._remove_pii_fast(content)
         
-        # Remove various PII using regular expressions
-        for pattern in PII_PATTERNS.values():
-            pii_removed_content = pattern.sub('[PII_REMOVED]', pii_removed_content)
-        
-        if not self.throughput_mode:
-            pii_removed_content = self._detect_pii_with_spacy(pii_removed_content)
+        if not self.throughput_mode and self.nlp:
+            regex_cleaned = self._apply_spacy_entities_batch([regex_cleaned])[0]
         
         self._record_timing('pii_removal', perf_counter() - start_time)
-        return pii_removed_content
-    
-    def _detect_pii_with_spacy(self, content):
-        """
-        Use spaCy to detect PII
-        """
-        if self.nlp is None:
-            name_pattern = r'\b[A-Z][a-z]+ [A-Z][a-z]+\b'
-            content = re.sub(name_pattern, '[NAME_REDACTED]', content)
-            return content
-        
-        doc = self.nlp(content)
-        pii_entities = []
-        
-        for ent in doc.ents:
-            if ent.label_ in ['PERSON', 'ORG', 'GPE']:  
-                pii_entities.append(ent.text)
-        
-        for entity in pii_entities:
-            content = content.replace(entity, '[PII_REMOVED]')
-        
-        return content
+        return regex_cleaned
     
     def _process_docx_xml(self, file_content, operation):
         """
@@ -592,38 +618,13 @@ class DocumentProcessor:
             }
             
             text_elements = root.findall('.//w:t', namespaces)
+            text_elements = [elem for elem in text_elements if elem.text]
+            texts = [elem.text or "" for elem in text_elements]
+            processed_texts = self._process_text_batch(texts, operation)
             
-            for elem in text_elements:
-                if elem.text:
-                    original_text = elem.text
-                    processed_text = original_text
-                    
-                    if operation == 'anonymize':
-                        # Anonymization
-                        for term in ANONYMIZE_TERMS:
-                            if term.lower() in original_text.lower():
-                                # Using regular expressions for case insensitive substitution
-                                processed_text = re.sub(
-                                    re.escape(term), 
-                                    ANONYMIZE_REPLACE, 
-                                    processed_text, 
-                                    flags=re.IGNORECASE
-                                )
-                    
-                    elif operation == 'remove_pii':
-                        # PII remove
-                        for pattern in PII_PATTERNS.values():
-                            processed_text = pattern.sub('[PII_REMOVED]', processed_text)
-                        
-                        # PII check
-                        if not self.throughput_mode and self.nlp:
-                            doc = self.nlp(processed_text)
-                            for ent in doc.ents:
-                                if ent.label_ in ['PERSON', 'ORG', 'GPE']:
-                                    processed_text = processed_text.replace(ent.text, '[PII_REMOVED]')
-                    
-                    if processed_text != original_text:
-                        elem.text = processed_text
+            for elem, original_text, processed_text in zip(text_elements, texts, processed_texts):
+                if processed_text != original_text:
+                    elem.text = processed_text
             
             # Return the processed XML content
             return ET.tostring(root, encoding='utf-8', method='xml')
@@ -639,33 +640,31 @@ class DocumentProcessor:
         try:
             doc = Document(io.BytesIO(file_content))
             
-            for paragraph in doc.paragraphs:
-                self._process_paragraph_comprehensive(paragraph, operation)
-            
-            for table in doc.tables:
-                for row in table.rows:
+            paragraphs = list(doc.paragraphs)
+
+            def _collect_table_paragraphs(table_obj, collection):
+                for row in table_obj.rows:
                     for cell in row.cells:
-                        for paragraph in cell.paragraphs:
-                            self._process_paragraph_comprehensive(paragraph, operation)
-            
+                        collection.extend(cell.paragraphs)
+
+            for table in doc.tables:
+                _collect_table_paragraphs(table, paragraphs)
+
             for section in doc.sections:
-                for paragraph in section.header.paragraphs:
-                    self._process_paragraph_comprehensive(paragraph, operation)
+                paragraphs.extend(section.header.paragraphs)
                 for table in section.header.tables:
-                    for row in table.rows:
-                        for cell in row.cells:
-                            for paragraph in cell.paragraphs:
-                                self._process_paragraph_comprehensive(paragraph, operation)
-            
-            for section in doc.sections:
-                for paragraph in section.footer.paragraphs:
-                    self._process_paragraph_comprehensive(paragraph, operation)
+                    _collect_table_paragraphs(table, paragraphs)
+                paragraphs.extend(section.footer.paragraphs)
                 for table in section.footer.tables:
-                    for row in table.rows:
-                        for cell in row.cells:
-                            for paragraph in cell.paragraphs:
-                                self._process_paragraph_comprehensive(paragraph, operation)
-            
+                    _collect_table_paragraphs(table, paragraphs)
+
+            original_texts = [para.text or "" for para in paragraphs]
+            processed_texts = self._process_text_batch(original_texts, operation)
+
+            for para, original_text, processed_text in zip(paragraphs, original_texts, processed_texts):
+                if processed_text != original_text:
+                    self._apply_text_to_paragraph(para, processed_text)
+
             output = io.BytesIO()
             doc.save(output)
             return output.getvalue()
@@ -673,45 +672,6 @@ class DocumentProcessor:
         except Exception as e:
             print(f"Error processing DOCX with python-docx: {e}")
             return file_content
-    
-    def _process_paragraph_comprehensive(self, paragraph, operation):
-        """
-        Process paragraphs
-        """
-        if not paragraph.text:
-            return
-        
-        original_text = paragraph.text
-        processed_text = original_text
-        
-        if operation == 'anonymize':
-            for term in ANONYMIZE_TERMS:
-                if term.lower() in original_text.lower():
-                    processed_text = re.sub(
-                        re.escape(term), 
-                        ANONYMIZE_REPLACE, 
-                        processed_text, 
-                        flags=re.IGNORECASE
-                    )
-        
-        elif operation == 'remove_pii':
-            for pattern in PII_PATTERNS.values():
-                processed_text = pattern.sub('[PII_REMOVED]', processed_text)
-            
-            if not self.throughput_mode and self.nlp:
-                doc = self.nlp(processed_text)
-                for ent in doc.ents:
-                    if ent.label_ in ['PERSON', 'ORG', 'GPE']:
-                        processed_text = processed_text.replace(ent.text, '[PII_REMOVED]')
-        
-        if processed_text != original_text:
-            for run in paragraph.runs:
-                run.text = ""
-            
-            if paragraph.runs:
-                paragraph.runs[0].text = processed_text
-            else:
-                paragraph.add_run(processed_text)
     
     def _create_pdf_with_layout(self, content, filename, original_file_content, metadata):
         """
