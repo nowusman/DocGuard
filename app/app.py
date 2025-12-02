@@ -278,7 +278,12 @@ processing_overrides = {
 
 # Process
 st.header('3. Process & Run')
-process_btn = st.button('🚀 Process', type='primary', use_container_width=True)
+process_btn = st.button(
+    '🚀 Process',
+    type='primary',
+    use_container_width=True,
+    disabled=st.session_state["processing_started"],
+)
 
 # Validate processing options
 if process_btn and not (anonymize or remove_pii or extract_json):
@@ -463,7 +468,7 @@ if st.session_state["processing_started"] or st.session_state["processing_done"]
 
     if processing_active:
         time.sleep(0.2)
-        st.experimental_rerun()
+        st.rerun()
 
 elif process_btn and not uploaded_files:
     st.warning("⚠️ Please upload at least one file to process.")

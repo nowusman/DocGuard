@@ -235,14 +235,14 @@ class DocumentProcessor:
                     content = '\n'.join(full_text)
                     
                     if extract_json:
-                        result = self._extract_to_json(content, filename, file_extension, processing_info, metadata)
+                        result = self._extract_to_json(content, filename, file_extension, processing_info, metadata, file_content)
                         return self._finalize_with_cache(result, '.json', metadata, cache_key)
                     else:
                         pdf_content = self._create_pdf_with_layout(content, filename, file_content, metadata)
                         return self._finalize_with_cache(pdf_content, '.pdf', metadata, cache_key)
             
             if extract_json:
-                result = self._extract_to_json(content, filename, file_extension, processing_info, metadata)
+                result = self._extract_to_json(content, filename, file_extension, processing_info, metadata, file_content)
                 return self._finalize_with_cache(result, '.json', metadata, cache_key)
             else:
                 pdf_content = self._create_pdf_with_layout(content, filename, file_content, metadata)
@@ -257,7 +257,7 @@ class DocumentProcessor:
                 content = self._remove_pii(content, file_extension, file_content)
             
             if extract_json:
-                result = self._extract_to_json(content, filename, file_extension, processing_info, metadata)
+                result = self._extract_to_json(content, filename, file_extension, processing_info, metadata, file_content)
                 return self._finalize_with_cache(result, '.json', metadata, cache_key)
             else:
                 if anonymize or remove_pii:
@@ -522,12 +522,30 @@ class DocumentProcessor:
 
         redacted = []
         for doc, original in zip(self.nlp.pipe(texts, batch_size=50, n_process=1), texts):
-            updated = original
-            for ent in doc.ents:
-                if ent.label_ in ['PERSON', 'ORG', 'GPE']:
-                    updated = updated.replace(ent.text, '[PII_REMOVED]')
-            redacted.append(updated)
+            base = self._remove_pii_fast(original)
+            redacted.append(self._apply_ner_spans(base, doc))
         return redacted
+
+    def _apply_ner_spans(self, text, doc):
+        """Redact spaCy entity spans without over-replacing substrings."""
+        if not getattr(doc, "ents", None):
+            return text
+        spans = [
+            (ent.start_char, ent.end_char)
+            for ent in doc.ents
+            if ent.label_ in {"PERSON", "ORG", "GPE"}
+        ]
+        if not spans:
+            return text
+        spans.sort()
+        out = []
+        last = 0
+        for start, end in spans:
+            out.append(text[last:start])
+            out.append("[PII_REMOVED]")
+            last = end
+        out.append(text[last:])
+        return "".join(out)
 
     def _process_text_batch(self, texts, operation):
         """Process a list of text snippets in batch using regex + spaCy pipe."""
@@ -575,7 +593,7 @@ class DocumentProcessor:
         try:
             return self._process_docx_direct(file_content, operation)
         except Exception as e:
-            print(f"Error in direct DOCX processing: {e}, falling back to python-docx")
+            self._log(f"Error in direct DOCX processing: {e}, falling back to python-docx")
             return self._process_docx_with_python_docx(file_content, operation)
     
     def _process_docx_direct(self, file_content, operation):
@@ -603,7 +621,7 @@ class DocumentProcessor:
             return output_zip.getvalue()
         
         except Exception as e:
-            print(f"Error in direct DOCX processing: {e}")
+            self._log(f"Error in direct DOCX processing: {e}")
             raise
     
     def _process_docx_xml_content(self, xml_content, operation):
@@ -630,7 +648,7 @@ class DocumentProcessor:
             return ET.tostring(root, encoding='utf-8', method='xml')
         
         except Exception as e:
-            print(f"Error processing DOCX XML content: {e}")
+            self._log(f"Error processing DOCX XML content: {e}")
             return xml_content
     
     def _process_docx_with_python_docx(self, file_content, operation):
@@ -670,7 +688,7 @@ class DocumentProcessor:
             return output.getvalue()
             
         except Exception as e:
-            print(f"Error processing DOCX with python-docx: {e}")
+            self._log(f"Error processing DOCX with python-docx: {e}")
             return file_content
     
     def _create_pdf_with_layout(self, content, filename, original_file_content, metadata):
@@ -808,7 +826,7 @@ class DocumentProcessor:
             return pdf_content
             
         except Exception as e:
-            print(f"Error creating PDF with layout: {e}")
+            self._log(f"Error creating PDF with layout: {e}")
             # If the creation fails, go back to simple PDF creation
             return self._create_pdf(content, filename)
         finally:
@@ -877,7 +895,7 @@ class DocumentProcessor:
             return pdf_content
             
         except Exception as e:
-            print(f"Error creating PDF: {e}")
+            self._log(f"Error creating PDF: {e}")
             return self._create_error_pdf(f"Error creating PDF: {str(e)}")
         finally:
             self._record_timing('pdf_generation', perf_counter() - start_time)
@@ -930,7 +948,7 @@ class DocumentProcessor:
 
                         images_data.append(image_info)
                     except Exception as e:
-                        print(f"Error extracting image {rel_id}: {e}")
+                        self._log(f"Error extracting image {rel_id}: {e}")
                         images_data.append({
                             "type": "docx_embedded_image",
                             "description": f"Embedded image {rel_id} (extraction failed)",
@@ -939,7 +957,7 @@ class DocumentProcessor:
                             "image_data": b"",
                         })
         except Exception as e:
-            print(f"Error processing DOCX images: {e}")
+            self._log(f"Error processing DOCX images: {e}")
         
         return self._process_images_with_ocr(images_data)
     
@@ -1024,10 +1042,15 @@ class DocumentProcessor:
                 futures[executor.submit(self._perform_ocr, img["image_data"])] = idx
 
             for future, idx in futures.items():
-                extracted = future.result()
-                images[idx]["extracted_text"] = extracted
-                images[idx]["ocr_applied"] = True
-                self._ocr_images_processed += 1
+                try:
+                    extracted = future.result()
+                    images[idx]["extracted_text"] = extracted
+                    images[idx]["ocr_applied"] = True
+                    self._ocr_images_processed += 1
+                except Exception as exc:
+                    images[idx]["extracted_text"] = f"[OCR failed: {exc}]"
+                    images[idx]["ocr_applied"] = False
+                    self._ocr_images_skipped += 1
 
         return images
 
@@ -1050,7 +1073,7 @@ class DocumentProcessor:
             cleaned_text = self._clean_ocr_text(" ".join(texts))
             return cleaned_text if cleaned_text else "[No text detected in image]"
         except Exception as e:
-            print(f"OCR processing failed: {e}")
+            self._log(f"OCR processing failed: {e}")
             return f"[OCR failed: {str(e)}]"
         finally:
             self._record_timing('ocr', perf_counter() - start_time)
@@ -1068,17 +1091,22 @@ class DocumentProcessor:
         
         return text
     
-    def _extract_to_json(self, content, filename, file_extension, processing_info, metadata):
+    def _extract_to_json(self, content, filename, file_extension, processing_info, metadata, original_file_content=None):
         """Extract content to JSON format"""
         json_output = JSON_SCHEMA.copy()
         
         if isinstance(content, bytes):
             content = content.decode('utf-8', errors='ignore')
         
+        if isinstance(original_file_content, (bytes, bytearray)):
+            file_size_bytes = len(original_file_content)
+        else:
+            file_size_bytes = len(str(original_file_content or "").encode('utf-8', errors='ignore'))
+
         json_output["document_metadata"]["filename"] = filename
         json_output["document_metadata"]["file_type"] = file_extension
         json_output["document_metadata"]["processing_date"] = datetime.now().isoformat()
-        json_output["document_metadata"]["file_size"] = len(content)
+        json_output["document_metadata"]["file_size"] = file_size_bytes
         
         json_output["content"]["text"] = content
         json_output["content"]["tables"] = metadata.get('tables', [])
