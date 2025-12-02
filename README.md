@@ -246,7 +246,7 @@ docker-compose logs -f frontend
 cd app
 
 # Build image
-docker build -t docguard:latest /app
+docker build -t docguard:latest ./app
 
 # Run container
 docker run -d \
