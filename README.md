@@ -144,34 +144,34 @@ open http://localhost:8501
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
-│                      Streamlit UI (Port 8501)                │
-│                         (app/app.py)                          │
+│                      Streamlit UI (Port 8501)               │
+│                         (app/app.py)                        │
 └───────────────┬─────────────────────────────────────────────┘
                 │
                 ▼
 ┌─────────────────────────────────────────────────────────────┐
-│              DocumentProcessor (In-Process)                   │
-│               (app/document_processor.py)                     │
-│                                                               │
-│  ┌──────────────┐  ┌───────────────┐  ┌─────────────────┐  │
-│  │   Parsing    │  │  PII Removal  │  │   PDF Output    │  │
-│  │ python-docx  │  │ Regex + spaCy │  │   ReportLab     │  │
-│  │   PyMuPDF    │  │               │  │                 │  │
-│  └──────────────┘  └───────────────┘  └─────────────────┘  │
-│                                                               │
-│  ┌──────────────┐  ┌───────────────┐  ┌─────────────────┐  │
-│  │   OCR (Opt)  │  │Table Extraction│  │   Caching       │  │
-│  │  PaddleOCR   │  │   PyMuPDF     │  │  LRU (in-mem)   │  │
-│  └──────────────┘  └───────────────┘  └─────────────────┘  │
+│              DocumentProcessor (In-Process)                 │
+│               (app/document_processor.py)                   │
+│                                                             │
+│  ┌──────────────┐  ┌───────────────┐  ┌─────────────────┐   │
+│  │   Parsing    │  │  PII Removal  │  │   PDF Output    │   │
+│  │ python-docx  │  │ Regex + spaCy │  │   ReportLab     │   │
+│  │   PyMuPDF    │  │               │  │                 │   │
+│  └──────────────┘  └───────────────┘  └─────────────────┘   │
+│                                                             │
+│  ┌──────────────┐  ┌────────────────┐ ┌─────────────────┐   │
+│  │   OCR (Opt)  │  │Table Extraction│ │    Caching      │   │
+│  │  PaddleOCR   │  │   PyMuPDF      │ │  LRU (in-mem)   │   │
+│  └──────────────┘  └────────────────┘ └─────────────────┘   │
 └─────────────────────────────────────────────────────────────┘
                 │
                 ▼
 ┌─────────────────────────────────────────────────────────────┐
-│                    Configuration Layer                        │
-│                      (app/config.py)                          │
-│                                                               │
-│  • ANONYMIZE_TERMS     • PII_PATTERNS    • OCR_CONFIG        │
-│  • PDF_HEADER_RATIO    • JSON_SCHEMA     • Feature Flags     │
+│                    Configuration Layer                      │
+│                      (app/config.py)                        │
+│                                                             │
+│  • ANONYMIZE_TERMS     • PII_PATTERNS    • OCR_CONFIG       │
+│  • PDF_HEADER_RATIO    • JSON_SCHEMA     • Feature Flags    │
 └─────────────────────────────────────────────────────────────┘
 ```
 
