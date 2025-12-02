@@ -15,26 +15,35 @@ Deliverables per phase include development, frontend, testing, deployment, clean
 ## Current Architecture Pain Points & Baseline
 
 ### Pain Points
-❌ **Sequential, single-threaded processing**: Files processed one at a time; no parallelism
-❌ **Blocking Streamlit UI**: All operations block the main thread; no responsiveness during processing
-❌ **No caching or parallel execution**: Duplicate files re-processed; no work reuse
-❌ **Excessive temp file I/O**: Images written to disk for OCR, then read back; high I/O overhead
-❌ **Multiple PDF parsing passes**: PDFs opened 3-4 times (PyPDF2, pdfplumber, PyMuPDF, Camelot) for text, tables, images
-❌ **Inefficient OCR strategy**: All images OCR'd regardless of size, contrast, or text presence; sequential processing
-❌ **High render cost for OCR**: Images rendered at 2.0× scale with RGBA (4 channels); memory and CPU intensive
-❌ **Inefficient spaCy NER**: Per-paragraph/per-page calls instead of batched nlp.pipe; unused pipeline components loaded
-❌ **All files held in memory simultaneously**: Memory scales linearly with batch size
-✅ **Simple, predictable behavior**: Current code is easy to understand and debug
+- ❌ **Sequential, single-threaded processing**: Files processed one at a time; no parallelism
+- ❌ **Blocking Streamlit UI**: All operations block the main thread; no responsiveness during processing
+- ❌ **No caching or parallel execution**: Duplicate files re-processed; no work reuse
+- ❌ **Excessive temp file I/O**: Images written to disk for OCR, then read back; high I/O overhead
+- ❌ **Multiple PDF parsing passes**: PDFs opened 3-4 times (PyPDF2, pdfplumber, PyMuPDF, Camelot) for text, tables, images
+- ❌ **Inefficient OCR strategy**: All images OCR'd regardless of size, contrast, or text presence; sequential processing
+- ❌ **High render cost for OCR**: Images rendered at 2.0× scale with RGBA (4 channels); memory and CPU intensive
+- ❌ **Inefficient spaCy NER**: Per-paragraph/per-page calls instead of batched nlp.pipe; unused pipeline components loaded
+- ❌ **All files held in memory simultaneously**: Memory scales linearly with batch size
+
+
+## DEVELOPEMENT PHASES & STATUS TRACKING
 
 ### Expected Improvements (Cumulative)
-- **Phase 1 (Parallel processing)**: 2–8× throughput for batches (CPU-bound workloads)
-- **Phase 2 (OCR optimization)**: 3–10× less OCR time on mixed PDFs (selective + faster engine)
-- **Phase 3 (PDF consolidation)**: 2–10× faster PDF text extraction (single-pass with PyMuPDF)
-- **Phase 4 (Caching)**: Near-instant re-processing for duplicate files
-- **Phase 5 (Async UI)**: Non-blocking UI; responsive during processing
-- **Phase 6 (spaCy optimization)**: 2–6× faster NER on document batches
-- **Phase 7 (Table extraction)**: Faster, more reliable table detection
-- **Phase 8-12 (UX + cleanup)**: Streaming results, progress tracking, cancellation, cleaner codebase
+- ✅Dev Complete - **Phase 1 (Parallel processing)**: 2–8× throughput for batches (CPU-bound workloads)
+- ✅Dev Complete - **Phase 2 (OCR optimization)**: 3–10× less OCR time on mixed PDFs (selective + faster engine)
+- ✅Dev Complete - **Phase 3 (PDF consolidation)**: 2–10× faster PDF text extraction (single-pass with PyMuPDF)
+- ✅Dev Complete - **Phase 4 (Caching)**: Near-instant re-processing for duplicate files
+- ✅Dev Complete - **Phase 5 (Async UI)**: Non-blocking UI; responsive during processing
+- ✅Dev Complete - **Phase 6 (spaCy optimization)**: 2–6× faster NER on document batches
+- **Phase 7 — Table extraction modernization**: Faster, more reliable table detection
+- **Phase 8 — Streaming results, progress bar, and per‑file availability**: Streaming results, progress tracking, cancellation, cleaner codebase
+- **Phase 9 — Cancel/kill processing from UI**: Additional control for users on UI
+- **Phase 10 — Multi‑session support hardening**: Better handling of multiple parallel sessions and multiple parallel users 
+- **Phase 11 — Cleanup, dead‑code removal, and migration completion**: Code cleanup and migration completion
+- **Phase 12 — Overall code review, testing, optimization and cleanup**: Review, testing and bug fixing
+- **Phase 13 — Deployment, runtime tuning, and docs**: Deployment tune-up and documentation
+
+
 
 ### Baseline Metrics (to be measured in Phase 0)
 - Average processing time per file type (PDF/DOCX/TXT)
@@ -47,7 +56,7 @@ Deliverables per phase include development, frontend, testing, deployment, clean
 ---
 
 
-Phase 0 — Baseline, flags, and instrumentation (1–2 days) — **Status: ✅ Completed (env-backed flags, instrumentation, Advanced options UI)**
+### Phase 0 — Baseline, flags, and instrumentation — **Status: ✅ Completed (env-backed flags, instrumentation, Advanced options UI)**
 - Goals
   - Establish a measurement baseline and minimal feature flags to stage changes safely
   - Add light perf instrumentation to identify hotspots
@@ -96,7 +105,7 @@ Phase 0 — Baseline, flags, and instrumentation (1–2 days) — **Status: ✅ 
   - Timing data visible when expanding Processing Details
 
 
-Phase 1 — Parallel per‑file processing (TIER 1) (0.5–1 day) — **Status: ✅ Completed (ProcessPool executor + live status UI)**
+### Phase 1 — Parallel per‑file processing  — **Status: ✅ Completed (ProcessPool executor + live status UI)**
 - Goals
   - 2–8× throughput for batches by processing files in parallel processes
   - Keep UI responsive; avoid blocking Streamlit thread
@@ -122,7 +131,7 @@ Phase 1 — Parallel per‑file processing (TIER 1) (0.5–1 day) — **Status: 
   - Batch run uses multiple CPU cores; UI remains responsive with incremental updates
 
 
-Phase 2 — OCR strategy optimization and faster engine option (TIER 1) (1–2 days) — **Status: ✅ Completed (Selective PaddleOCR + bounded parallel OCR)**
+### Phase 2 — OCR strategy optimization and faster engine option  — **Status: ✅ Completed (Selective PaddleOCR + bounded parallel OCR)**
 - Goals
   - Reduce unnecessary OCR work; switch from Tesseract to PaddleOCR for speed and accuracy
   - Add parallel OCR processing for multiple images within a document
@@ -162,7 +171,7 @@ Phase 2 — OCR strategy optimization and faster engine option (TIER 1) (1–2 d
   - Multiple images OCR'd in parallel within document; bounded memory usage
 
 
-Phase 3 — Single-pass PDF consolidation with PyMuPDF (TIER 1) (1–2 days) — **Status: ✅ Completed (PyMuPDF single-pass + metadata surfaced)**
+### Phase 3 — Single-pass PDF consolidation with PyMuPDF — **Status: ✅ Completed (PyMuPDF single-pass + metadata surfaced)**
 - Goals
   - Open each PDF once; extract text, tables, images in one pass using fitz; reduce I/O and memory churn
   - Eliminate redundant PDF parsing (Standardize on PyMuPDF)
@@ -225,7 +234,7 @@ Phase 3 — Single-pass PDF consolidation with PyMuPDF (TIER 1) (1–2 days) —
   - Fallback works for complex PDFs
 
 
-Phase 4 — Caching layer (TIER 2) (0.5 day) — **Status: ✅ Completed (per-worker LRU cache + UI surfacing)**
+### Phase 4 — Caching layer  — **Status: ✅ Completed (per-worker LRU cache + UI surfacing)**
 - Goals
   - Instant re‑processing for duplicate inputs and unchanged options within a session
 - Development
@@ -245,7 +254,7 @@ Phase 4 — Caching layer (TIER 2) (0.5 day) — **Status: ✅ Completed (per-wo
   - Duplicate work within a session is skipped; memory bounded by max cache items
 
 
-Phase 5 — Async UI with background worker (TIER 2) (1 day) — **Status: ✅ Completed (background thread + queue-driven status UI)**
+### Phase 5 — Async UI with background worker
 - Goals
   - Decouple UI from processing to avoid blocking Streamlit interactions
 - Development (app.py)
@@ -266,7 +275,7 @@ Phase 5 — Async UI with background worker (TIER 2) (1 day) — **Status: ✅ C
   - UI remains interactive during processing; partial results appear as they finish
 
 
-Phase 6 — spaCy and PII pipeline optimization (TIER 2) (1 day) — **Status: ✅ Completed (regex-only fast mode + batched spaCy NER)**
+### Phase 6 — spaCy and PII pipeline optimization
 - Goals
   - 2–6× faster NER on many small chunks via batching; regex-only fast mode
   - Reduce spaCy overhead by disabling unused pipeline components
@@ -321,7 +330,7 @@ Phase 6 — spaCy and PII pipeline optimization (TIER 2) (1 day) — **Status: �
   - Memory usage remains bounded during batching
 
 
-Phase 7 — Table extraction modernization (TIER 3) (1–2 days)
+### Phase 7 — Table extraction modernization
 - Goals
   - Faster, simpler table extraction with fewer dependencies
 - Development
@@ -342,7 +351,7 @@ Phase 7 — Table extraction modernization (TIER 3) (1–2 days)
   - Similar or better table recall with faster runtime; Camelot removed post‑validation
 
 
-Phase 8 — Streaming results, progress bar, and per‑file availability (TIER 3) (1 day)
+### Phase 8 — Streaming results, progress bar, and per‑file availability
 - Goals
   - Incremental availability of outputs and visible progress
 - Development (app.py)
@@ -363,7 +372,7 @@ Phase 8 — Streaming results, progress bar, and per‑file availability (TIER 3
   - Users see progress and can download files as they complete
 
 
-Phase 9 — Cancel/kill processing from UI (TIER 3) (0.5–1 day)
+### Phase 9 — Cancel/kill processing from UI
 - Goals
   - Users can stop long batch processing
 - Development (app.py)
@@ -383,7 +392,7 @@ Phase 9 — Cancel/kill processing from UI (TIER 3) (0.5–1 day)
   - Pending tasks are canceled and no new work is scheduled; UI updates correctly
 
 
-Phase 10 — Multi‑session support hardening (0.5 day)
+### Phase 10 — Multi‑session support hardening
 - Goals
   - Ensure multiple users do not contend on shared globals
 - Development
@@ -405,7 +414,7 @@ Phase 10 — Multi‑session support hardening (0.5 day)
   - Independent sessions without cross‑talk or shared cache surprises
 
 
-Phase 11 — Cleanup, dead‑code removal, and migration completion (0.5–1 day)
+### Phase 11 — Cleanup, dead‑code removal, and migration completion
 - Goals
   - Zero legacy/dead code, consistent patterns, and no duplicate flows
   - Eliminate temp file I/O overhead for images
@@ -468,7 +477,12 @@ Phase 11 — Cleanup, dead‑code removal, and migration completion (0.5–1 day
   - Measurable I/O and performance improvements
 
 
-Phase 12 — Deployment, runtime tuning, and docs (0.5 day)
+### Phase 12 — Overall code review, testing, optimization and cleanup
+  - Take a deep review of overall code and optimize & clean where required
+  - Conduct an end to end testing of the app to identify and fix any bugs
+    
+
+### Phase 13 — Deployment, runtime tuning, and docs
 - Goals
   - Make performance predictable in containers and document best practices
 - Development / Deployment
@@ -487,39 +501,14 @@ Phase 12 — Deployment, runtime tuning, and docs (0.5 day)
 - Acceptance criteria
   - Clear runtime guidance; stable performance under typical loads
 
+---
 
-Timeline and sequencing
-- Week 1: Phases 0–3 (baseline, parallelism, OCR heuristics, PyMuPDF consolidation)
-- Week 2: Phases 4–8 (caching, async UI, spaCy optimizations, streaming/progress)
-- Week 3: Phases 9–12 (cancel, multi‑session hardening, cleanup, deployment/docs)
-
-
-Testing plan (applies to all phases)
+## Testing plan (applies to all phases)
 - Unit‑like checks where practical inside document_processor methods
 - Golden files for small sample corpus (text extract, table presence counts, JSON keys)
 - Side‑by‑side timing logs per file and per step
 - Manual exploratory tests for UI: progress, cancellation, and partial downloads
 
-
-Risk/mitigation and rollback
-- PyMuPDF accuracy vs pdfplumber: Validate on baseline corpus; fallback only if critical issues found
-- PaddleOCR: Validate installation size and CPU usage
-- ProcessPool memory: Use bounded max_workers; avoid holding giant intermediate buffers in UI; stream results incrementally
-- Cancellation granularity: cancel_futures=True cancels queued work only; document this limitation
-
-
-Acceptance summary (overall)
-- End‑to‑end batch throughput improved by 3–8× in typical mixed workloads
-- UI remains responsive with progress, streaming results, and cancellation
-- Codebase consolidated (single‑pass PDF path, fewer deps), no dead code
-- Clear configuration, deployment guidance, and documentation
-
-
-Open questions (to finalize defaults)
-- Typical workload: PDF vs DOCX vs TXT; average pages; % image‑only PDFs?
-- OCR accuracy needs: Is aggressive OCR skipping acceptable by default?
-- Expected concurrency: single user large batches vs multiple users? Affects sensible default for max_workers
-- Target environment: local laptop vs server vs container platform (CPUs/Memory)?
 
 ---
 
@@ -532,14 +521,6 @@ Open questions (to finalize defaults)
 4. **Logging**: Guard verbose prints with `VERBOSE_LOGGING` flag to reduce I/O overhead
 5. **Error Handling**: Always use `try/finally` blocks to ensure temp file cleanup
 6. **Bytes/Str**: Avoid repeated conversions; use consistent UTF-8 encoding
-
-### Performance Priorities (Sorted by Impact)
-1. **Parallel file processing** (Phase 1): 2–8× gain, low complexity
-2. **PyMuPDF single-pass** (Phase 3): 2–10× gain on PDF-heavy workloads
-3. **Selective OCR** (Phase 2): 3–10× gain on mixed scanned/text PDFs
-4. **Parallel OCR** (Phase 2): 2–4× gain on image-heavy pages
-5. **spaCy batching** (Phase 6): 2–6× gain on DOCX with many paragraphs
-6. **In-memory images** (Phase 11): Eliminates I/O bottleneck, faster on image-heavy docs
 
 ### Risk Mitigation
 - **PyMuPDF accuracy**: Validate on baseline corpus
