@@ -120,6 +120,7 @@ class DocumentProcessor:
         metadata['timing'] = dict(self._timing)
         metadata['throughput_mode'] = self.throughput_mode
         metadata['cache_hit'] = metadata.get('cache_hit', False)
+        metadata['ner_mode'] = 'regex_only' if (self.throughput_mode or not self.nlp) else 'spacy_batch'
         metadata['ocr'] = {
             'engine': self.ocr_engine if self.ocr_available else 'unavailable',
             'images_processed': self._ocr_images_processed,
@@ -234,14 +235,14 @@ class DocumentProcessor:
                     content = '\n'.join(full_text)
                     
                     if extract_json:
-                        result = self._extract_to_json(content, filename, file_extension, processing_info, metadata)
+                        result = self._extract_to_json(content, filename, file_extension, processing_info, metadata, file_content)
                         return self._finalize_with_cache(result, '.json', metadata, cache_key)
                     else:
                         pdf_content = self._create_pdf_with_layout(content, filename, file_content, metadata)
                         return self._finalize_with_cache(pdf_content, '.pdf', metadata, cache_key)
             
             if extract_json:
-                result = self._extract_to_json(content, filename, file_extension, processing_info, metadata)
+                result = self._extract_to_json(content, filename, file_extension, processing_info, metadata, file_content)
                 return self._finalize_with_cache(result, '.json', metadata, cache_key)
             else:
                 pdf_content = self._create_pdf_with_layout(content, filename, file_content, metadata)
@@ -256,7 +257,7 @@ class DocumentProcessor:
                 content = self._remove_pii(content, file_extension, file_content)
             
             if extract_json:
-                result = self._extract_to_json(content, filename, file_extension, processing_info, metadata)
+                result = self._extract_to_json(content, filename, file_extension, processing_info, metadata, file_content)
                 return self._finalize_with_cache(result, '.json', metadata, cache_key)
             else:
                 if anonymize or remove_pii:
@@ -485,22 +486,90 @@ class DocumentProcessor:
         return images
 
     
+    def _apply_anonymization_terms(self, text: str) -> str:
+        """Apply configured anonymization terms to a text snippet."""
+        anonymized_content = text
+        for term in ANONYMIZE_TERMS:
+            anonymized_content = re.sub(
+                re.escape(term),
+                ANONYMIZE_REPLACE,
+                anonymized_content,
+                flags=re.IGNORECASE
+            )
+        return anonymized_content
+
     def _apply_anonymization(self, content, file_extension, original_content):
         """Application anonymization processing - only for TXT and PDF"""
         
         if isinstance(content, bytes):
             content = content.decode('utf-8')
             
-        anonymized_content = content
-        for term in ANONYMIZE_TERMS:
-            anonymized_content = re.sub(
-                re.escape(term), 
-                ANONYMIZE_REPLACE, 
-                anonymized_content, 
-                flags=re.IGNORECASE
-            )
+        return self._apply_anonymization_terms(content)
+    
+    def _remove_pii_fast(self, content: str) -> str:
+        """Regex-only PII removal for fast mode or as a preprocessing step."""
+        pii_removed_content = content
+        for pattern in PII_PATTERNS.values():
+            pii_removed_content = pattern.sub('[PII_REMOVED]', pii_removed_content)
+        return pii_removed_content
+    
+    def _apply_spacy_entities_batch(self, texts):
+        """Apply spaCy entity redaction in batch for PERSON/ORG/GPE."""
+        if not texts:
+            return []
+        if not self.nlp:
+            return [self._remove_pii_fast(text) for text in texts]
+
+        redacted = []
+        for doc, original in zip(self.nlp.pipe(texts, batch_size=50, n_process=1), texts):
+            base = self._remove_pii_fast(original)
+            redacted.append(self._apply_ner_spans(base, doc))
+        return redacted
+
+    def _apply_ner_spans(self, text, doc):
+        """Redact spaCy entity spans without over-replacing substrings."""
+        if not getattr(doc, "ents", None):
+            return text
+        spans = [
+            (ent.start_char, ent.end_char)
+            for ent in doc.ents
+            if ent.label_ in {"PERSON", "ORG", "GPE"}
+        ]
+        if not spans:
+            return text
+        spans.sort()
+        out = []
+        last = 0
+        for start, end in spans:
+            out.append(text[last:start])
+            out.append("[PII_REMOVED]")
+            last = end
+        out.append(text[last:])
+        return "".join(out)
+
+    def _process_text_batch(self, texts, operation):
+        """Process a list of text snippets in batch using regex + spaCy pipe."""
+        processed = []
+        if operation == 'anonymize':
+            return [self._apply_anonymization_terms(text) for text in texts]
+
+        if operation == 'remove_pii':
+            regex_only = [self._remove_pii_fast(text) for text in texts]
+            if self.throughput_mode or not self.nlp:
+                return regex_only
+            return self._apply_spacy_entities_batch(regex_only)
+
+        return texts
+
+    def _apply_text_to_paragraph(self, paragraph, new_text: str):
+        """Replace paragraph content with processed text while keeping styling simple."""
+        for run in paragraph.runs:
+            run.text = ""
         
-        return anonymized_content
+        if paragraph.runs:
+            paragraph.runs[0].text = new_text
+        else:
+            paragraph.add_run(new_text)
     
     def _remove_pii(self, content, file_extension, original_content):
         """Remove PII information - for TXT and PDF only"""
@@ -509,38 +578,13 @@ class DocumentProcessor:
         if isinstance(content, bytes):
             content = content.decode('utf-8')
             
-        pii_removed_content = content
+        regex_cleaned = self._remove_pii_fast(content)
         
-        # Remove various PII using regular expressions
-        for pattern in PII_PATTERNS.values():
-            pii_removed_content = pattern.sub('[PII_REMOVED]', pii_removed_content)
-        
-        if not self.throughput_mode:
-            pii_removed_content = self._detect_pii_with_spacy(pii_removed_content)
+        if not self.throughput_mode and self.nlp:
+            regex_cleaned = self._apply_spacy_entities_batch([regex_cleaned])[0]
         
         self._record_timing('pii_removal', perf_counter() - start_time)
-        return pii_removed_content
-    
-    def _detect_pii_with_spacy(self, content):
-        """
-        Use spaCy to detect PII
-        """
-        if self.nlp is None:
-            name_pattern = r'\b[A-Z][a-z]+ [A-Z][a-z]+\b'
-            content = re.sub(name_pattern, '[NAME_REDACTED]', content)
-            return content
-        
-        doc = self.nlp(content)
-        pii_entities = []
-        
-        for ent in doc.ents:
-            if ent.label_ in ['PERSON', 'ORG', 'GPE']:  
-                pii_entities.append(ent.text)
-        
-        for entity in pii_entities:
-            content = content.replace(entity, '[PII_REMOVED]')
-        
-        return content
+        return regex_cleaned
     
     def _process_docx_xml(self, file_content, operation):
         """
@@ -549,7 +593,7 @@ class DocumentProcessor:
         try:
             return self._process_docx_direct(file_content, operation)
         except Exception as e:
-            print(f"Error in direct DOCX processing: {e}, falling back to python-docx")
+            self._log(f"Error in direct DOCX processing: {e}, falling back to python-docx")
             return self._process_docx_with_python_docx(file_content, operation)
     
     def _process_docx_direct(self, file_content, operation):
@@ -577,7 +621,7 @@ class DocumentProcessor:
             return output_zip.getvalue()
         
         except Exception as e:
-            print(f"Error in direct DOCX processing: {e}")
+            self._log(f"Error in direct DOCX processing: {e}")
             raise
     
     def _process_docx_xml_content(self, xml_content, operation):
@@ -592,44 +636,19 @@ class DocumentProcessor:
             }
             
             text_elements = root.findall('.//w:t', namespaces)
+            text_elements = [elem for elem in text_elements if elem.text]
+            texts = [elem.text or "" for elem in text_elements]
+            processed_texts = self._process_text_batch(texts, operation)
             
-            for elem in text_elements:
-                if elem.text:
-                    original_text = elem.text
-                    processed_text = original_text
-                    
-                    if operation == 'anonymize':
-                        # Anonymization
-                        for term in ANONYMIZE_TERMS:
-                            if term.lower() in original_text.lower():
-                                # Using regular expressions for case insensitive substitution
-                                processed_text = re.sub(
-                                    re.escape(term), 
-                                    ANONYMIZE_REPLACE, 
-                                    processed_text, 
-                                    flags=re.IGNORECASE
-                                )
-                    
-                    elif operation == 'remove_pii':
-                        # PII remove
-                        for pattern in PII_PATTERNS.values():
-                            processed_text = pattern.sub('[PII_REMOVED]', processed_text)
-                        
-                        # PII check
-                        if not self.throughput_mode and self.nlp:
-                            doc = self.nlp(processed_text)
-                            for ent in doc.ents:
-                                if ent.label_ in ['PERSON', 'ORG', 'GPE']:
-                                    processed_text = processed_text.replace(ent.text, '[PII_REMOVED]')
-                    
-                    if processed_text != original_text:
-                        elem.text = processed_text
+            for elem, original_text, processed_text in zip(text_elements, texts, processed_texts):
+                if processed_text != original_text:
+                    elem.text = processed_text
             
             # Return the processed XML content
             return ET.tostring(root, encoding='utf-8', method='xml')
         
         except Exception as e:
-            print(f"Error processing DOCX XML content: {e}")
+            self._log(f"Error processing DOCX XML content: {e}")
             return xml_content
     
     def _process_docx_with_python_docx(self, file_content, operation):
@@ -639,79 +658,38 @@ class DocumentProcessor:
         try:
             doc = Document(io.BytesIO(file_content))
             
-            for paragraph in doc.paragraphs:
-                self._process_paragraph_comprehensive(paragraph, operation)
-            
-            for table in doc.tables:
-                for row in table.rows:
+            paragraphs = list(doc.paragraphs)
+
+            def _collect_table_paragraphs(table_obj, collection):
+                for row in table_obj.rows:
                     for cell in row.cells:
-                        for paragraph in cell.paragraphs:
-                            self._process_paragraph_comprehensive(paragraph, operation)
-            
+                        collection.extend(cell.paragraphs)
+
+            for table in doc.tables:
+                _collect_table_paragraphs(table, paragraphs)
+
             for section in doc.sections:
-                for paragraph in section.header.paragraphs:
-                    self._process_paragraph_comprehensive(paragraph, operation)
+                paragraphs.extend(section.header.paragraphs)
                 for table in section.header.tables:
-                    for row in table.rows:
-                        for cell in row.cells:
-                            for paragraph in cell.paragraphs:
-                                self._process_paragraph_comprehensive(paragraph, operation)
-            
-            for section in doc.sections:
-                for paragraph in section.footer.paragraphs:
-                    self._process_paragraph_comprehensive(paragraph, operation)
+                    _collect_table_paragraphs(table, paragraphs)
+                paragraphs.extend(section.footer.paragraphs)
                 for table in section.footer.tables:
-                    for row in table.rows:
-                        for cell in row.cells:
-                            for paragraph in cell.paragraphs:
-                                self._process_paragraph_comprehensive(paragraph, operation)
-            
+                    _collect_table_paragraphs(table, paragraphs)
+
+            original_texts = [para.text or "" for para in paragraphs]
+            processed_texts = self._process_text_batch(original_texts, operation)
+
+            for para, original_text, processed_text in zip(paragraphs, original_texts, processed_texts):
+                if processed_text != original_text:
+                    self._apply_text_to_paragraph(para, processed_text)
+
             output = io.BytesIO()
             doc.save(output)
             return output.getvalue()
             
         except Exception as e:
-            print(f"Error processing DOCX with python-docx: {e}")
+            self._log(f"Error processing DOCX with python-docx: {e}")
             return file_content
-    
-    def _process_paragraph_comprehensive(self, paragraph, operation):
-        """
-        Process paragraphs
-        """
-        if not paragraph.text:
-            return
-        
-        original_text = paragraph.text
-        processed_text = original_text
-        
-        if operation == 'anonymize':
-            for term in ANONYMIZE_TERMS:
-                if term.lower() in original_text.lower():
-                    processed_text = re.sub(
-                        re.escape(term), 
-                        ANONYMIZE_REPLACE, 
-                        processed_text, 
-                        flags=re.IGNORECASE
-                    )
-        
-        elif operation == 'remove_pii':
-            for pattern in PII_PATTERNS.values():
-                processed_text = pattern.sub('[PII_REMOVED]', processed_text)
-            
-            if not self.throughput_mode and self.nlp:
-                doc = self.nlp(processed_text)
-                for ent in doc.ents:
-                    if ent.label_ in ['PERSON', 'ORG', 'GPE']:
-                        processed_text = processed_text.replace(ent.text, '[PII_REMOVED]')
-        
-        if processed_text != original_text:
-            for run in paragraph.runs:
-                run.text = ""
-            
-            if paragraph.runs:
-                paragraph.runs[0].text = processed_text
-            else:
-                paragraph.add_run(processed_text)
     
     def _create_pdf_with_layout(self, content, filename, original_file_content, metadata):
         """
@@ -848,7 +826,7 @@ class DocumentProcessor:
             return pdf_content
             
         except Exception as e:
-            print(f"Error creating PDF with layout: {e}")
+            self._log(f"Error creating PDF with layout: {e}")
             # If the creation fails, go back to simple PDF creation
             return self._create_pdf(content, filename)
         finally:
@@ -917,7 +895,7 @@ class DocumentProcessor:
             return pdf_content
             
         except Exception as e:
-            print(f"Error creating PDF: {e}")
+            self._log(f"Error creating PDF: {e}")
             return self._create_error_pdf(f"Error creating PDF: {str(e)}")
         finally:
             self._record_timing('pdf_generation', perf_counter() - start_time)
@@ -970,7 +948,7 @@ class DocumentProcessor:
 
                         images_data.append(image_info)
                     except Exception as e:
-                        print(f"Error extracting image {rel_id}: {e}")
+                        self._log(f"Error extracting image {rel_id}: {e}")
                         images_data.append({
                             "type": "docx_embedded_image",
                             "description": f"Embedded image {rel_id} (extraction failed)",
@@ -979,7 +957,7 @@ class DocumentProcessor:
                             "image_data": b"",
                         })
         except Exception as e:
-            print(f"Error processing DOCX images: {e}")
+            self._log(f"Error processing DOCX images: {e}")
         
         return self._process_images_with_ocr(images_data)
     
@@ -1064,10 +1042,15 @@ class DocumentProcessor:
                 futures[executor.submit(self._perform_ocr, img["image_data"])] = idx
 
             for future, idx in futures.items():
-                extracted = future.result()
-                images[idx]["extracted_text"] = extracted
-                images[idx]["ocr_applied"] = True
-                self._ocr_images_processed += 1
+                try:
+                    extracted = future.result()
+                    images[idx]["extracted_text"] = extracted
+                    images[idx]["ocr_applied"] = True
+                    self._ocr_images_processed += 1
+                except Exception as exc:
+                    images[idx]["extracted_text"] = f"[OCR failed: {exc}]"
+                    images[idx]["ocr_applied"] = False
+                    self._ocr_images_skipped += 1
 
         return images
 
@@ -1090,7 +1073,7 @@ class DocumentProcessor:
             cleaned_text = self._clean_ocr_text(" ".join(texts))
             return cleaned_text if cleaned_text else "[No text detected in image]"
         except Exception as e:
-            print(f"OCR processing failed: {e}")
+            self._log(f"OCR processing failed: {e}")
             return f"[OCR failed: {str(e)}]"
         finally:
             self._record_timing('ocr', perf_counter() - start_time)
@@ -1108,17 +1091,22 @@ class DocumentProcessor:
         
         return text
     
-    def _extract_to_json(self, content, filename, file_extension, processing_info, metadata):
+    def _extract_to_json(self, content, filename, file_extension, processing_info, metadata, original_file_content=None):
         """Extract content to JSON format"""
         json_output = JSON_SCHEMA.copy()
         
         if isinstance(content, bytes):
             content = content.decode('utf-8', errors='ignore')
         
+        if isinstance(original_file_content, (bytes, bytearray)):
+            file_size_bytes = len(original_file_content)
+        else:
+            file_size_bytes = len(str(original_file_content or "").encode('utf-8', errors='ignore'))
+
         json_output["document_metadata"]["filename"] = filename
         json_output["document_metadata"]["file_type"] = file_extension
         json_output["document_metadata"]["processing_date"] = datetime.now().isoformat()
-        json_output["document_metadata"]["file_size"] = len(content)
+        json_output["document_metadata"]["file_size"] = file_size_bytes
         
         json_output["content"]["text"] = content
         json_output["content"]["tables"] = metadata.get('tables', [])

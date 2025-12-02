@@ -4,6 +4,9 @@ import io
 import json
 import logging
 import zipfile
+import queue
+import threading
+import time
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
@@ -38,6 +41,105 @@ def _derive_output_name(filename: str, anonymize: bool, remove_pii: bool, extrac
         return f"{stem}_processed.pdf"
     return filename
 
+
+def _run_background_batch(jobs, worker_count, result_queue):
+    """Run ProcessPool work in a background thread and stream updates into a queue."""
+    with ProcessPoolExecutor(max_workers=worker_count) as executor:
+        future_to_idx = {}
+        for idx, job in enumerate(jobs):
+            future = executor.submit(_process_file_worker, job["payload"])
+            future_to_idx[future] = idx
+            result_queue.put({"type": "status", "index": idx, "status": "Processing"})
+
+        for future in as_completed(future_to_idx):
+            idx = future_to_idx[future]
+            job = jobs[idx]
+            try:
+                processed_content, file_extension, metadata = future.result()
+                result_queue.put(
+                    {
+                        "type": "result",
+                        "index": idx,
+                        "original_name": job["original_name"],
+                        "order": job["order"],
+                        "content": processed_content,
+                        "extension": file_extension,
+                        "metadata": metadata,
+                    }
+                )
+            except Exception as exc:
+                result_queue.put(
+                    {
+                        "type": "error",
+                        "index": idx,
+                        "original_name": job["original_name"],
+                        "error": str(exc),
+                    }
+                )
+    result_queue.put({"type": "done"})
+
+
+def _init_processing_state():
+    defaults = {
+        "processing_thread": None,
+        "processing_queue": None,
+        "processing_results": [],
+        "processing_errors": [],
+        "status_rows": [],
+        "processing_total": 0,
+        "processing_started": False,
+        "processing_done": False,
+    }
+    for key, value in defaults.items():
+        if key not in st.session_state:
+            st.session_state[key] = value
+
+
+def _drain_result_queue(anonymize, remove_pii, extract_json):
+    """Consume queued messages from the background batch worker."""
+    q = st.session_state["processing_queue"]
+    if not q:
+        return 0
+
+    updates = 0
+    while True:
+        try:
+            message = q.get_nowait()
+        except queue.Empty:
+            break
+
+        msg_type = message.get("type")
+        idx = message.get("index")
+        if msg_type == "status" and idx is not None and idx < len(st.session_state["status_rows"]):
+            st.session_state["status_rows"][idx]["Status"] = message.get("status", "Processing")
+        elif msg_type == "result":
+            output_filename = _derive_output_name(
+                message["original_name"], anonymize, remove_pii, extract_json
+            )
+            st.session_state["processing_results"].append(
+                {
+                    "name": output_filename,
+                    "content": message["content"],
+                    "original_name": message["original_name"],
+                    "file_extension": message["extension"],
+                    "metadata": message.get("metadata") or {},
+                    "order": message.get("order", idx),
+                }
+            )
+            if idx is not None and idx < len(st.session_state["status_rows"]):
+                st.session_state["status_rows"][idx]["Status"] = "Done"
+            updates += 1
+        elif msg_type == "error":
+            if idx is not None and idx < len(st.session_state["status_rows"]):
+                st.session_state["status_rows"][idx]["Status"] = "Error"
+            st.session_state["processing_errors"].append(
+                f"Error processing {message.get('original_name')}: {message.get('error')}"
+            )
+            updates += 1
+        elif msg_type == "done":
+            st.session_state["processing_done"] = True
+    return updates
+
 # Set page configuration
 st.set_page_config(
     page_title="DocGuard",
@@ -67,6 +169,7 @@ def inject_custom_css():
         logging.exception("Failed to inject custom CSS: %s", e)
 
 inject_custom_css()
+_init_processing_state()
 
 # Hero header
 # Security: The following HTML is static only; avoid interpolating any user input
@@ -175,196 +278,197 @@ processing_overrides = {
 
 # Process
 st.header('3. Process & Run')
-process_btn = st.button('🚀 Process', type='primary', use_container_width=True)
+process_btn = st.button(
+    '🚀 Process',
+    type='primary',
+    use_container_width=True,
+    disabled=st.session_state["processing_started"],
+)
 
 # Validate processing options
-if process_btn:
-    if not (anonymize or remove_pii or extract_json):
-        st.error("❌ Please select at least one processing option (Anonymize, Remove PII, or Extract to JSON)")
+if process_btn and not (anonymize or remove_pii or extract_json):
+    st.error("❌ Please select at least one processing option (Anonymize, Remove PII, or Extract to JSON)")
 
-# Processing logic
+progress_placeholder = st.empty()
+status_placeholder = st.empty()
+
 if process_btn and uploaded_files and size_ok and (anonymize or remove_pii or extract_json):
-    with st.spinner("Processing your documents..."):
-        processed_files = []
-        processing_errors = []
-        total_files = len(uploaded_files)
-        worker_count = max(1, min(total_files, MAX_WORKERS))
-        progress_placeholder = st.empty()
-        status_placeholder = st.empty()
-        status_rows = []
-        future_to_job = {}
+    if st.session_state["processing_started"]:
+        st.info("Processing is already running. Please wait for it to finish.")
+    else:
+        st.session_state["processing_results"] = []
+        st.session_state["processing_errors"] = []
+        st.session_state["processing_done"] = False
+        st.session_state["processing_total"] = len(uploaded_files)
+        st.session_state["status_rows"] = [{"File": file.name, "Status": "Queued"} for file in uploaded_files]
 
-        def render_status():
-            if status_rows:
-                status_placeholder.dataframe(
-                    pd.DataFrame(status_rows),
-                    use_container_width=True,
-                    hide_index=True,
-                )
+        jobs = []
+        for order, file in enumerate(uploaded_files):
+            file_bytes = file.getvalue()
+            payload = {
+                "file_content": file_bytes,
+                "filename": file.name,
+                "anonymize": anonymize,
+                "remove_pii": remove_pii,
+                "extract_json": extract_json,
+                "options": processing_overrides,
+            }
+            jobs.append({"payload": payload, "original_name": file.name, "order": order})
+
+        worker_count = max(1, min(len(jobs), MAX_WORKERS))
+        result_queue = queue.Queue()
+        background_thread = threading.Thread(
+            target=_run_background_batch,
+            args=(jobs, worker_count, result_queue),
+            daemon=True,
+        )
+        background_thread.start()
+
+        st.session_state["processing_thread"] = background_thread
+        st.session_state["processing_queue"] = result_queue
+        st.session_state["processing_started"] = True
+
+# Render progress/status and consume queue updates
+processing_active = bool(st.session_state["processing_thread"] and st.session_state["processing_thread"].is_alive())
+if st.session_state["processing_started"] or st.session_state["processing_done"]:
+    _drain_result_queue(anonymize, remove_pii, extract_json)
+    total_files = st.session_state["processing_total"]
+    completed_count = len(st.session_state["processing_results"]) + len(st.session_state["processing_errors"])
+
+    if st.session_state["status_rows"]:
+        status_placeholder.dataframe(
+            pd.DataFrame(st.session_state["status_rows"]),
+            use_container_width=True,
+            hide_index=True,
+        )
+    if total_files:
+        if completed_count < total_files:
+            progress_placeholder.info(f"Processed {completed_count}/{total_files} files…")
+        else:
+            progress_placeholder.success(f"Processed {completed_count}/{total_files} files.")
+
+    if st.session_state["processing_done"] and not processing_active:
+        st.session_state["processing_thread"] = None
+        st.session_state["processing_queue"] = None
+        st.session_state["processing_started"] = False
+
+    processed_files = sorted(st.session_state["processing_results"], key=lambda pf: pf["order"])
+
+    if processed_files and st.session_state["processing_done"]:
+        st.success(f"✅ Successfully processed {len(processed_files)} files!")
+
+        st.subheader("Processing Summary")
+        summary_data = []
+        for pf in processed_files:
+            content = pf["content"]
+            if isinstance(content, bytes):
+                content_size = len(content)
+            elif isinstance(content, str):
+                content_size = len(content.encode('utf-8'))
             else:
-                status_placeholder.empty()
+                content_size = 0
+            metadata = pf.get("metadata") or {}
+            summary_data.append({
+                "Original File": pf["original_name"],
+                "Processed File": pf["name"],
+                "Output Format": pf["file_extension"],
+                "Size (KB)": round(content_size / 1024, 2) if content_size else "N/A",
+                "Cache": "Yes" if metadata.get("cache_hit") else "No",
+            })
+        st.dataframe(pd.DataFrame(summary_data), use_container_width=True, hide_index=True)
 
-        with ProcessPoolExecutor(max_workers=worker_count) as executor:
-            for order, file in enumerate(uploaded_files):
-                file_bytes = file.getvalue()
-                payload = {
-                    "file_content": file_bytes,
-                    "filename": file.name,
-                    "anonymize": anonymize,
-                    "remove_pii": remove_pii,
-                    "extract_json": extract_json,
-                    "options": processing_overrides,
-                }
-                future = executor.submit(_process_file_worker, payload)
-                status_index = len(status_rows)
-                status_rows.append({"File": file.name, "Status": "Processing"})
-                future_to_job[future] = {
-                    "order": order,
-                    "original_name": file.name,
-                    "status_index": status_index,
-                }
+        with st.expander("Processing Details"):
+            st.write("**Applied Processing Options:**")
+            st.json({
+                "Anonymize": anonymize,
+                "Remove PII": remove_pii,
+                "Extract to JSON": extract_json,
+                "Throughput mode": throughput_mode,
+                "Verbose logging": verbose_logging,
+                "OCR enabled": bool(ocr_enabled),
+            })
 
-            render_status()
-            completed = 0
-
-            for future in as_completed(future_to_job):
-                job_info = future_to_job[future]
-                completed += 1
-                try:
-                    processed_content, file_extension, metadata = future.result()
-                    output_filename = _derive_output_name(
-                        job_info["original_name"],
-                        anonymize,
-                        remove_pii,
-                        extract_json,
+            if processed_files and processed_files[0].get("metadata"):
+                first_meta = processed_files[0]["metadata"]
+                timing = first_meta.get("timing", {})
+                st.write(f"**Timing (first file: {processed_files[0]['original_name']})**")
+                if timing:
+                    timing_rows = [
+                        {"Step": key.replace("_", " ").title(), "Seconds": round(value, 3)}
+                        for key, value in timing.items()
+                    ]
+                    st.dataframe(pd.DataFrame(timing_rows), use_container_width=True, hide_index=True)
+                else:
+                    st.info("Timing data not available for this file.")
+                st.caption(f"Throughput mode applied: {'Yes' if first_meta.get('throughput_mode') else 'No'}")
+                st.write("**Engine & Cache**")
+                st.write(f"Cache hit: {'Yes' if first_meta.get('cache_hit') else 'No'}")
+                pdf_engine = first_meta.get('pdf_engine')
+                if pdf_engine:
+                    st.write(f"PDF engine: {pdf_engine}")
+                ocr_meta = first_meta.get("ocr") or {}
+                if ocr_meta:
+                    st.write("**OCR details**")
+                    st.write(
+                        f"Engine: {ocr_meta.get('engine', 'unknown')} · "
+                        f"Images processed: {ocr_meta.get('images_processed', 0)} · "
+                        f"Skipped: {ocr_meta.get('images_skipped', 0)} "
+                        f"(max per doc: {ocr_meta.get('max_images_per_doc', 'N/A')})"
                     )
-                    processed_files.append({
-                        "name": output_filename,
-                        "content": processed_content,
-                        "original_name": job_info["original_name"],
-                        "file_extension": file_extension,
-                        "metadata": metadata,
-                        "order": job_info["order"],
-                    })
-                    status_rows[job_info["status_index"]]["Status"] = "Done"
-                except Exception as exc:
-                    status_rows[job_info["status_index"]]["Status"] = "Error"
-                    processing_errors.append(f"Error processing {job_info['original_name']}: {exc}")
+                ner_mode = first_meta.get("ner_mode")
+                if ner_mode:
+                    st.write(f"NER mode: {ner_mode}")
 
-                render_status()
-                progress_placeholder.info(f"Processed {completed}/{total_files} files…")
+            if extract_json and processed_files and isinstance(processed_files[0]["content"], str):
+                st.write("**JSON Output Preview (first file):**")
+                try:
+                    json_preview = json.loads(processed_files[0]["content"])
+                    st.json(json_preview)
+                except:
+                    st.text_area("JSON Content", processed_files[0]["content"][:1000] + "...", height=200)
 
-        processed_files.sort(key=lambda pf: pf["order"])
-        progress_placeholder.success(f"Processed {len(processed_files)}/{total_files} files.")
-
-        if processed_files:
-            st.success(f"✅ Successfully processed {len(processed_files)} files!")
-
-            st.subheader("Processing Summary")
-            summary_data = []
+        zip_buffer = io.BytesIO()
+        with zipfile.ZipFile(zip_buffer, "w") as zip_file:
             for pf in processed_files:
                 content = pf["content"]
-                if isinstance(content, bytes):
-                    content_size = len(content)
-                elif isinstance(content, str):
-                    content_size = len(content.encode('utf-8'))
-                else:
-                    content_size = 0
-                metadata = pf.get("metadata") or {}
-                summary_data.append({
-                    "Original File": pf["original_name"],
-                    "Processed File": pf["name"],
-                    "Output Format": pf["file_extension"],
-                    "Size (KB)": round(content_size / 1024, 2) if content_size else "N/A",
-                    "Cache": "Yes" if metadata.get("cache_hit") else "No",
-                })
-            st.dataframe(pd.DataFrame(summary_data), use_container_width=True, hide_index=True)
+                if isinstance(content, str):
+                    content = content.encode('utf-8')
+                zip_file.writestr(pf["name"], content)
 
-            with st.expander("Processing Details"):
-                st.write("**Applied Processing Options:**")
-                st.json({
-                    "Anonymize": anonymize,
-                    "Remove PII": remove_pii,
-                    "Extract to JSON": extract_json,
-                    "Throughput mode": throughput_mode,
-                    "Verbose logging": verbose_logging,
-                    "OCR enabled": bool(ocr_enabled),
-                })
+        zip_buffer.seek(0)
 
-                if processed_files and processed_files[0].get("metadata"):
-                    first_meta = processed_files[0]["metadata"]
-                    timing = first_meta.get("timing", {})
-                    st.write(f"**Timing (first file: {processed_files[0]['original_name']})**")
-                    if timing:
-                        timing_rows = [
-                            {"Step": key.replace("_", " ").title(), "Seconds": round(value, 3)}
-                            for key, value in timing.items()
-                        ]
-                        st.dataframe(pd.DataFrame(timing_rows), use_container_width=True, hide_index=True)
-                    else:
-                        st.info("Timing data not available for this file.")
-                    st.caption(f"Throughput mode applied: {'Yes' if first_meta.get('throughput_mode') else 'No'}")
-                    st.write("**Engine & Cache**")
-                    st.write(f"Cache hit: {'Yes' if first_meta.get('cache_hit') else 'No'}")
-                    pdf_engine = first_meta.get('pdf_engine')
-                    if pdf_engine:
-                        st.write(f"PDF engine: {pdf_engine}")
-                    ocr_meta = first_meta.get("ocr") or {}
-                    if ocr_meta:
-                        st.write("**OCR details**")
-                        st.write(
-                            f"Engine: {ocr_meta.get('engine', 'unknown')} · "
-                            f"Images processed: {ocr_meta.get('images_processed', 0)} · "
-                            f"Skipped: {ocr_meta.get('images_skipped', 0)} "
-                            f"(max per doc: {ocr_meta.get('max_images_per_doc', 'N/A')})"
-                        )
+        st.header("4. Download Processed Files")
+        download_filename = f"processed_documents_{datetime.now().strftime('%Y%m%d_%H%M%S')}.zip"
+        st.download_button(
+            label="📥 Download All Processed Files",
+            data=zip_buffer,
+            file_name=download_filename,
+            mime="application/zip",
+            use_container_width=True,
+            help="Download all processed files as a ZIP archive"
+        )
 
-                if extract_json and processed_files and isinstance(processed_files[0]["content"], str):
-                    st.write("**JSON Output Preview (first file):**")
-                    try:
-                        json_preview = json.loads(processed_files[0]["content"])
-                        st.json(json_preview)
-                    except:
-                        st.text_area("JSON Content", processed_files[0]["content"][:1000] + "...", height=200)
+        st.subheader("Download Individual Files")
+        cols = st.columns(3)
+        for idx, pf in enumerate(processed_files):
+            with cols[idx % 3]:
+                mime_type = "application/json" if pf["file_extension"] == ".json" else "application/octet-stream"
+                st.download_button(
+                    label=f"📄 {pf['name']}",
+                    data=pf["content"],
+                    file_name=pf["name"],
+                    mime=mime_type,
+                    key=f"single_{idx}"
+                )
 
-            zip_buffer = io.BytesIO()
-            with zipfile.ZipFile(zip_buffer, "w") as zip_file:
-                for pf in processed_files:
-                    content = pf["content"]
-                    if isinstance(content, str):
-                        content = content.encode('utf-8')
-                    zip_file.writestr(pf["name"], content)
+    if st.session_state["processing_errors"]:
+        st.error("Processing Errors:")
+        for error in st.session_state["processing_errors"]:
+            st.write(f"• {error}")
 
-            zip_buffer.seek(0)
-
-            st.header("4. Download Processed Files")
-            download_filename = f"processed_documents_{datetime.now().strftime('%Y%m%d_%H%M%S')}.zip"
-            st.download_button(
-                label="📥 Download All Processed Files",
-                data=zip_buffer,
-                file_name=download_filename,
-                mime="application/zip",
-                use_container_width=True,
-                help="Download all processed files as a ZIP archive"
-            )
-
-            st.subheader("Download Individual Files")
-            cols = st.columns(3)
-            for idx, pf in enumerate(processed_files):
-                with cols[idx % 3]:
-                    mime_type = "application/json" if pf["file_extension"] == ".json" else "application/octet-stream"
-                    st.download_button(
-                        label=f"📄 {pf['name']}",
-                        data=pf["content"],
-                        file_name=pf["name"],
-                        mime=mime_type,
-                        key=f"single_{idx}"
-                    )
-
-        if processing_errors:
-            st.error("Processing Errors:")
-            for error in processing_errors:
-                st.write(f"• {error}")
+    if processing_active:
+        time.sleep(0.2)
+        st.rerun()
 
 elif process_btn and not uploaded_files:
     st.warning("⚠️ Please upload at least one file to process.")
@@ -396,7 +500,9 @@ with st.sidebar:
         st.write("No files uploaded")
     
     st.header("⚙️ Processing Status")
-    if process_btn and uploaded_files and size_ok and (anonymize or remove_pii or extract_json):
+    if st.session_state["processing_started"] and not st.session_state["processing_done"]:
+        st.info("Processing in progress…")
+    elif st.session_state["processing_done"]:
         st.success("Processing completed!")
     elif process_btn and not uploaded_files:
         st.error("Processing failed - no files")
