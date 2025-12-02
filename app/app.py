@@ -170,7 +170,7 @@ def _drain_result_queue(anonymize, remove_pii, extract_json):
 
 # Set page configuration
 st.set_page_config(
-    page_title="DocGuard",
+    page_title="DocGuard by TSA",
     page_icon="🛡️",
     layout="wide"
 )
@@ -291,12 +291,12 @@ with st.expander("Advanced options"):
 with st.expander("⚙️ Anonymization Settings"):
     anonymize_terms_input = st.text_area(
         "Terms to Anonymize (one per line)",
-        value="",
+        value="stc",
         help="One per line or comma-separated; case-insensitive; duplicates removed.",
     )
     anonymize_replace_input = st.text_input(
         "Replacement string",
-        value="[REDACTED]",
+        value="sss",
         help="Replacement string; leave empty to replace with a single space",
     )
 
