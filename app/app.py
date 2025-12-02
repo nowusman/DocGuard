@@ -595,6 +595,6 @@ with st.sidebar:
 # Footer
 st.markdown("---")
 st.markdown(
-    "<div style='text-align: center; color: gray;'>DocGuard v1.0 © STC 2025</div>", 
+    "<div style='text-align: center; color: gray;'>DocGuard v1.0 ©TSA 2025</div>", 
     unsafe_allow_html=True
 )
