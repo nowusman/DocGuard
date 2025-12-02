@@ -26,9 +26,8 @@ from reportlab.lib.utils import ImageReader
 from reportlab.platypus import Image, Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
 from time import perf_counter
 
+import config
 from config import (
-    ANONYMIZE_TERMS,
-    ANONYMIZE_REPLACE,
     PII_PATTERNS,
     JSON_SCHEMA,
     OCR_CONFIG,
@@ -54,6 +53,13 @@ class DocumentProcessor:
         self._cache = OrderedDict()
         self._paddle_ocr = None
         self.ocr_engine = OCR_ENGINE
+        self.default_anonymize_terms = self._normalize_anonymization_terms(
+            getattr(config, "ANONYMIZE_TERMS", ["stc"])
+        )
+        default_replace = getattr(config, "ANONYMIZE_REPLACE", "sss")
+        self.default_anonymize_replace = str(default_replace) if default_replace is not None else ""
+        self.anonymize_terms = list(self.default_anonymize_terms)
+        self.anonymize_replace = self.default_anonymize_replace
         # Load spaCy model
         try:
             self.nlp = spacy.load("en_core_web_sm")
@@ -167,11 +173,17 @@ class DocumentProcessor:
         """
         The main functions for processing documents
         """
-        options = options or {}
+        options = dict(options) if options else {}
         self.verbose_logging = options.get('verbose_logging', VERBOSE_LOGGING)
         self.throughput_mode = options.get('throughput_mode', THROUGHPUT_MODE)
         if 'ocr_enabled' in options:
             OCR_CONFIG['enabled'] = bool(options['ocr_enabled'])
+        self._set_anonymization_settings(
+            options.get('anonymize_terms'),
+            options.get('anonymize_replace'),
+        )
+        options['anonymize_terms'] = self.anonymize_terms
+        options['anonymize_replace'] = self.anonymize_replace
         self._reset_timing()
         cache_key = None
         cached_result = None
@@ -225,14 +237,12 @@ class DocumentProcessor:
                 
                 if anonymize or remove_pii:
                     doc = Document(io.BytesIO(processed_bytes))
-                    full_text = []
-                    for paragraph in doc.paragraphs:
-                        full_text.append(paragraph.text)
-                    for table in doc.tables:
-                        for row in table.rows:
-                            for cell in row.cells:
-                                full_text.append(cell.text)
-                    content = '\n'.join(full_text)
+                    content, tables_data, paragraphs = self._extract_docx_text_structures(doc)
+                    sanitized_metadata = deepcopy(metadata)
+                    sanitized_metadata['text_content'] = content
+                    sanitized_metadata['tables'] = tables_data
+                    sanitized_metadata['paragraphs'] = paragraphs
+                    metadata = sanitized_metadata
                     
                     if extract_json:
                         result = self._extract_to_json(content, filename, file_extension, processing_info, metadata, file_content)
@@ -290,21 +300,30 @@ class DocumentProcessor:
         """Read DOCX file"""
         start_time = perf_counter()
         doc = Document(io.BytesIO(file_content))
+        content, tables_data, paragraphs = self._extract_docx_text_structures(doc)
+        images_data = self._extract_images_from_docx(doc, file_content)
+        metadata = {
+            'text_content': content,
+            'tables': tables_data,
+            'images': images_data,
+            'paragraphs': paragraphs,
+        }
+        
+        self._record_timing('read_docx', perf_counter() - start_time)
+        return content, metadata
+
+    def _extract_docx_text_structures(self, doc):
+        """Extract docx text, tables, and paragraphs in a reusable way."""
         full_text = []
         tables_data = []
-        images_data = []
-        
-        # Read paragraph
+
         for paragraph in doc.paragraphs:
             full_text.append(paragraph.text)
-        
-        # Read talbe
+
         for table_idx, table in enumerate(doc.tables):
             table_data = []
             for row in table.rows:
-                row_data = []
-                for cell in row.cells:
-                    row_data.append(cell.text)
+                row_data = [cell.text for cell in row.cells]
                 table_data.append(row_data)
             tables_data.append({
                 'table_index': table_idx,
@@ -312,23 +331,13 @@ class DocumentProcessor:
                 'rows': len(table.rows),
                 'cols': len(table.columns) if hasattr(table, 'columns') else len(table.rows[0].cells) if table.rows else 0
             })
-            
+
             for row in table_data:
                 full_text.append(' | '.join(row))
-        
-        # Extract images
-        images_data = self._extract_images_from_docx(doc, file_content)
-        
+
+        paragraphs = [p.text for p in doc.paragraphs if p.text.strip()]
         content = '\n'.join(full_text)
-        metadata = {
-            'text_content': content,
-            'tables': tables_data,
-            'images': images_data,
-            'paragraphs': [p.text for p in doc.paragraphs if p.text.strip()]
-        }
-        
-        self._record_timing('read_docx', perf_counter() - start_time)
-        return content, metadata
+        return content, tables_data, paragraphs
     
 
     #############################3
@@ -486,13 +495,42 @@ class DocumentProcessor:
         return images
 
     
+    def _normalize_anonymization_terms(self, terms) -> list:
+        """Normalize anonymization terms: trim, drop empties, de-duplicate preserving order."""
+        if not terms:
+            return []
+        normalized = []
+        seen = set()
+        for raw_term in terms:
+            if raw_term is None:
+                continue
+            term = str(raw_term).strip()
+            if not term:
+                continue
+            key = term.lower()
+            if key in seen:
+                continue
+            seen.add(key)
+            normalized.append(term)
+        return normalized
+
+    def _set_anonymization_settings(self, terms_override, replace_override):
+        """Apply per-request anonymization overrides with config defaults."""
+        terms_source = terms_override if terms_override is not None else self.default_anonymize_terms
+        replacement_source = replace_override if replace_override is not None else self.default_anonymize_replace
+        self.anonymize_terms = self._normalize_anonymization_terms(terms_source)
+        self.anonymize_replace = "" if replacement_source is None else str(replacement_source)
+
     def _apply_anonymization_terms(self, text: str) -> str:
         """Apply configured anonymization terms to a text snippet."""
+        if not self.anonymize_terms:
+            return text
         anonymized_content = text
-        for term in ANONYMIZE_TERMS:
+        replacement_value = " " if self.anonymize_replace == "" else self.anonymize_replace
+        for term in self.anonymize_terms:
             anonymized_content = re.sub(
                 re.escape(term),
-                ANONYMIZE_REPLACE,
+                replacement_value,
                 anonymized_content,
                 flags=re.IGNORECASE
             )
@@ -1093,7 +1131,7 @@ class DocumentProcessor:
     
     def _extract_to_json(self, content, filename, file_extension, processing_info, metadata, original_file_content=None):
         """Extract content to JSON format"""
-        json_output = JSON_SCHEMA.copy()
+        json_output = deepcopy(JSON_SCHEMA)
         
         if isinstance(content, bytes):
             content = content.decode('utf-8', errors='ignore')

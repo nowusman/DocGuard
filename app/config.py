@@ -29,10 +29,6 @@ def _get_float(name: str, default: float) -> float:
         return default
 
 
-# Anonymous configuration
-ANONYMIZE_TERMS = ["STC"]
-ANONYMIZE_REPLACE = "[REDACTED]"
-
 # Runtime flags (tweak via .env or Streamlit toggles)
 THROUGHPUT_MODE = _get_bool("THROUGHPUT_MODE", False)
 OCR_MAX_IMAGES_PER_DOC = _get_int("OCR_MAX_IMAGES_PER_DOC", 10)

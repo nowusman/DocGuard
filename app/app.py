@@ -42,6 +42,25 @@ def _derive_output_name(filename: str, anonymize: bool, remove_pii: bool, extrac
     return filename
 
 
+def _parse_anonymize_terms_input(raw_terms: str) -> list:
+    """Normalize anonymization terms from the UI input."""
+    if not raw_terms:
+        return []
+    terms = []
+    seen = set()
+    for line in raw_terms.splitlines():
+        parts = [part.strip() for part in line.split(",")]
+        for term in parts:
+            if not term:
+                continue
+            key = term.lower()
+            if key in seen:
+                continue
+            seen.add(key)
+            terms.append(term)
+    return terms
+
+
 def _run_background_batch(jobs, worker_count, result_queue):
     """Run ProcessPool work in a background thread and stream updates into a queue."""
     with ProcessPoolExecutor(max_workers=worker_count) as executor:
@@ -89,6 +108,8 @@ def _init_processing_state():
         "processing_total": 0,
         "processing_started": False,
         "processing_done": False,
+        "processing_batch_options": None,
+        "job_operations": [],
     }
     for key, value in defaults.items():
         if key not in st.session_state:
@@ -110,11 +131,17 @@ def _drain_result_queue(anonymize, remove_pii, extract_json):
 
         msg_type = message.get("type")
         idx = message.get("index")
+        job_ops = st.session_state.get("job_operations") or []
+        ops = (
+            job_ops[idx]
+            if idx is not None and idx < len(job_ops)
+            else {"anonymize": anonymize, "remove_pii": remove_pii, "extract_json": extract_json}
+        )
         if msg_type == "status" and idx is not None and idx < len(st.session_state["status_rows"]):
             st.session_state["status_rows"][idx]["Status"] = message.get("status", "Processing")
         elif msg_type == "result":
             output_filename = _derive_output_name(
-                message["original_name"], anonymize, remove_pii, extract_json
+                message["original_name"], ops["anonymize"], ops["remove_pii"], ops["extract_json"]
             )
             st.session_state["processing_results"].append(
                 {
@@ -124,6 +151,7 @@ def _drain_result_queue(anonymize, remove_pii, extract_json):
                     "file_extension": message["extension"],
                     "metadata": message.get("metadata") or {},
                     "order": message.get("order", idx),
+                    "operations": ops,
                 }
             )
             if idx is not None and idx < len(st.session_state["status_rows"]):
@@ -150,16 +178,6 @@ st.set_page_config(
 # Inject custom CSS
 def inject_custom_css():
     css_path = Path(__file__).with_name("styles.css")
-    # Preconnect + load Inter via <link> for better performance than @import
-    st.markdown(
-        """
-
-        <link rel=\"preconnect\" href=\"https://fonts.googleapis.com\">
-        <link rel=\"preconnect\" href=\"https://fonts.gstatic.com\" crossorigin>
-        <link href=\"https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700&display=swap\" rel=\"stylesheet\">
-        """,
-        unsafe_allow_html=True,
-    )
     try:
         css = css_path.read_text()
         st.markdown(f"<style>{css}</style>", unsafe_allow_html=True)
@@ -270,10 +288,26 @@ with st.expander("Advanced options"):
     )
     st.caption(f"Parallel workers available: up to {MAX_WORKERS}")
 
+with st.expander("⚙️ Anonymization Settings"):
+    anonymize_terms_input = st.text_area(
+        "Terms to Anonymize (one per line)",
+        value="stc",
+        help="comma separated strings to be find and replaced (case insensitive)",
+    )
+    anonymize_replace_input = st.text_input(
+        "Replacement string",
+        value="sss",
+        help="Replacement string, keep it empty to replace with a space",
+    )
+
+parsed_anonymize_terms = _parse_anonymize_terms_input(anonymize_terms_input)
+
 processing_overrides = {
     "throughput_mode": throughput_mode,
     "verbose_logging": verbose_logging,
     "ocr_enabled": bool(ocr_enabled),
+    "anonymize_terms": parsed_anonymize_terms,
+    "anonymize_replace": anonymize_replace_input,
 }
 
 # Process
@@ -301,6 +335,16 @@ if process_btn and uploaded_files and size_ok and (anonymize or remove_pii or ex
         st.session_state["processing_done"] = False
         st.session_state["processing_total"] = len(uploaded_files)
         st.session_state["status_rows"] = [{"File": file.name, "Status": "Queued"} for file in uploaded_files]
+        batch_options_snapshot = {
+            "anonymize": anonymize,
+            "remove_pii": remove_pii,
+            "extract_json": extract_json,
+            "throughput_mode": throughput_mode,
+            "verbose_logging": verbose_logging,
+            "ocr_enabled": bool(ocr_enabled),
+        }
+        st.session_state["processing_batch_options"] = batch_options_snapshot
+        st.session_state["job_operations"] = []
 
         jobs = []
         for order, file in enumerate(uploaded_files):
@@ -314,6 +358,11 @@ if process_btn and uploaded_files and size_ok and (anonymize or remove_pii or ex
                 "options": processing_overrides,
             }
             jobs.append({"payload": payload, "original_name": file.name, "order": order})
+            st.session_state["job_operations"].append({
+                "anonymize": anonymize,
+                "remove_pii": remove_pii,
+                "extract_json": extract_json,
+            })
 
         worker_count = max(1, min(len(jobs), MAX_WORKERS))
         result_queue = queue.Queue()
@@ -331,7 +380,15 @@ if process_btn and uploaded_files and size_ok and (anonymize or remove_pii or ex
 # Render progress/status and consume queue updates
 processing_active = bool(st.session_state["processing_thread"] and st.session_state["processing_thread"].is_alive())
 if st.session_state["processing_started"] or st.session_state["processing_done"]:
-    _drain_result_queue(anonymize, remove_pii, extract_json)
+    batch_opts = st.session_state.get("processing_batch_options") or {
+        "anonymize": anonymize,
+        "remove_pii": remove_pii,
+        "extract_json": extract_json,
+        "throughput_mode": throughput_mode,
+        "verbose_logging": verbose_logging,
+        "ocr_enabled": bool(ocr_enabled),
+    }
+    _drain_result_queue(batch_opts["anonymize"], batch_opts["remove_pii"], batch_opts["extract_json"])
     total_files = st.session_state["processing_total"]
     completed_count = len(st.session_state["processing_results"]) + len(st.session_state["processing_errors"])
 
@@ -368,24 +425,35 @@ if st.session_state["processing_started"] or st.session_state["processing_done"]
             else:
                 content_size = 0
             metadata = pf.get("metadata") or {}
+            ops = pf.get("operations") or batch_opts
+            ops_list = []
+            if ops.get("anonymize"):
+                ops_list.append("Anonymize")
+            if ops.get("remove_pii"):
+                ops_list.append("Remove PII")
+            if ops.get("extract_json"):
+                ops_list.append("Extract JSON")
             summary_data.append({
                 "Original File": pf["original_name"],
                 "Processed File": pf["name"],
                 "Output Format": pf["file_extension"],
                 "Size (KB)": round(content_size / 1024, 2) if content_size else "N/A",
                 "Cache": "Yes" if metadata.get("cache_hit") else "No",
+                "Ops": ", ".join(ops_list) if ops_list else "None",
             })
         st.dataframe(pd.DataFrame(summary_data), use_container_width=True, hide_index=True)
 
         with st.expander("Processing Details"):
             st.write("**Applied Processing Options:**")
             st.json({
-                "Anonymize": anonymize,
-                "Remove PII": remove_pii,
-                "Extract to JSON": extract_json,
-                "Throughput mode": throughput_mode,
-                "Verbose logging": verbose_logging,
-                "OCR enabled": bool(ocr_enabled),
+                "Anonymize": batch_opts.get("anonymize", False),
+                "Remove PII": batch_opts.get("remove_pii", False),
+                "Extract to JSON": batch_opts.get("extract_json", False),
+                "Throughput mode": batch_opts.get("throughput_mode", False),
+                "Verbose logging": batch_opts.get("verbose_logging", False),
+                "OCR enabled": batch_opts.get("ocr_enabled", False),
+                "Anonymize terms": parsed_anonymize_terms,
+                "Anonymize replace": anonymize_replace_input if anonymize_replace_input != "" else " ",
             })
 
             if processed_files and processed_files[0].get("metadata"):
@@ -419,7 +487,7 @@ if st.session_state["processing_started"] or st.session_state["processing_done"]
                 if ner_mode:
                     st.write(f"NER mode: {ner_mode}")
 
-            if extract_json and processed_files and isinstance(processed_files[0]["content"], str):
+            if batch_opts.get("extract_json") and processed_files and isinstance(processed_files[0]["content"], str):
                 st.write("**JSON Output Preview (first file):**")
                 try:
                     json_preview = json.loads(processed_files[0]["content"])
@@ -513,7 +581,7 @@ with st.sidebar:
     with st.expander("Configuration Info"):
         st.write("**Supported Operations:**")
         st.json({
-            "Anonymize Terms": "Configurable terms from config.py",
+            "Anonymize Terms": "Configured at runtime in the UI (⚙️ Anonymization Settings)",
             "PII Patterns": "Email, Phone, SSN, Credit Card, IBAN",
             "Output Formats": "PDF (for anonymized/PII removed), JSON (when extracted)"
         })
