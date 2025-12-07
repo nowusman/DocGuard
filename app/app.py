@@ -24,12 +24,7 @@ from config import (
     VERBOSE_LOGGING,
 )
 
-
-def _process_file_worker(payload):
-    """Isolated worker entrypoint for ProcessPoolExecutor."""
-    from document_processor import processor as shared_processor
-
-    return shared_processor.process_document(**payload)
+from worker import _process_file_worker
 
 
 def _derive_output_name(filename: str, anonymize: bool, remove_pii: bool, extract_json: bool) -> str:
@@ -256,7 +251,7 @@ if uploaded_files:
         })
     
     df_files = pd.DataFrame(file_info)
-    st.dataframe(df_files, use_container_width=True, hide_index=True)
+    st.dataframe(df_files, width="stretch", hide_index=True)
 
 # Processing Options
 st.header("2. 🛠️ Processing Options")
@@ -315,7 +310,7 @@ st.header('3. Process & Run')
 process_btn = st.button(
     '🚀 Process',
     type='primary',
-    use_container_width=True,
+    width="stretch",
     disabled=st.session_state["processing_started"],
 )
 
@@ -397,7 +392,7 @@ if st.session_state["processing_started"] or st.session_state["processing_done"]
     if st.session_state["status_rows"]:
         status_placeholder.dataframe(
             pd.DataFrame(st.session_state["status_rows"]),
-            use_container_width=True,
+            width="stretch",
             hide_index=True,
         )
     if total_files:
@@ -443,7 +438,7 @@ if st.session_state["processing_started"] or st.session_state["processing_done"]
                 "Cache": "Yes" if metadata.get("cache_hit") else "No",
                 "Ops": ", ".join(ops_list) if ops_list else "None",
             })
-        st.dataframe(pd.DataFrame(summary_data), use_container_width=True, hide_index=True)
+        st.dataframe(pd.DataFrame(summary_data), width="stretch", hide_index=True)
         effective_terms = batch_opts.get("anonymize_terms", parsed_anonymize_terms)
         _replace_raw = batch_opts.get("anonymize_replace", anonymize_replace_input)
         effective_replace = _replace_raw if _replace_raw != "" else " "
@@ -471,7 +466,7 @@ if st.session_state["processing_started"] or st.session_state["processing_done"]
                         {"Step": key.replace("_", " ").title(), "Seconds": round(value, 3)}
                         for key, value in timing.items()
                     ]
-                    st.dataframe(pd.DataFrame(timing_rows), use_container_width=True, hide_index=True)
+                    st.dataframe(pd.DataFrame(timing_rows), width="stretch", hide_index=True)
                 else:
                     st.info("Timing data not available for this file.")
                 st.caption(f"Throughput mode applied: {'Yes' if first_meta.get('throughput_mode') else 'No'}")
@@ -518,7 +513,7 @@ if st.session_state["processing_started"] or st.session_state["processing_done"]
             data=zip_buffer,
             file_name=download_filename,
             mime="application/zip",
-            use_container_width=True,
+            width="stretch",
             help="Download all processed files as a ZIP archive"
         )
 
