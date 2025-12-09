@@ -9,7 +9,7 @@ ENV OMP_NUM_THREADS=1
 RUN pip install --no-cache-dir -r requirements.txt
 RUN python -m spacy download en_core_web_sm
 # minimal native deps for imaging/OCR backends
-RUN apt-get update && apt-get install -y libgl1 libglib2.0-0 && rm -rf /var/lib/apt/lists/*
+RUN apt-get update && apt-get install -y libgl1 libglib2.0-0 ghostscript && rm -rf /var/lib/apt/lists/*
 # # expose port 8000
 # EXPOSE 8000
 # # run api

@@ -24,12 +24,7 @@ from config import (
     VERBOSE_LOGGING,
 )
 
-
-def _process_file_worker(payload):
-    """Isolated worker entrypoint for ProcessPoolExecutor."""
-    from document_processor import processor as shared_processor
-
-    return shared_processor.process_document(**payload)
+from worker import _process_file_worker
 
 
 def _derive_output_name(filename: str, anonymize: bool, remove_pii: bool, extract_json: bool) -> str:
@@ -139,27 +134,35 @@ def _drain_result_queue(anonymize, remove_pii, extract_json):
         )
         if msg_type == "status" and idx is not None and idx < len(st.session_state["status_rows"]):
             st.session_state["status_rows"][idx]["Status"] = message.get("status", "Processing")
+            if "Progress" in st.session_state["status_rows"][idx]:
+                st.session_state["status_rows"][idx]["Progress"] = 50
         elif msg_type == "result":
             output_filename = _derive_output_name(
                 message["original_name"], ops["anonymize"], ops["remove_pii"], ops["extract_json"]
             )
-            st.session_state["processing_results"].append(
-                {
-                    "name": output_filename,
-                    "content": message["content"],
-                    "original_name": message["original_name"],
-                    "file_extension": message["extension"],
-                    "metadata": message.get("metadata") or {},
-                    "order": message.get("order", idx),
-                    "operations": ops,
-                }
-            )
+            result_data = {
+                "name": output_filename,
+                "content": message["content"],
+                "original_name": message["original_name"],
+                "file_extension": message["extension"],
+                "metadata": message.get("metadata") or {},
+                "order": message.get("order", idx),
+                "operations": ops,
+                "processed_time": datetime.now(),
+                "status": "Done",
+            }
+
+            st.session_state["processing_results"].append(result_data)
+            
             if idx is not None and idx < len(st.session_state["status_rows"]):
                 st.session_state["status_rows"][idx]["Status"] = "Done"
+                st.session_state["status_rows"][idx]["Progress"] = 100
+                
             updates += 1
         elif msg_type == "error":
             if idx is not None and idx < len(st.session_state["status_rows"]):
                 st.session_state["status_rows"][idx]["Status"] = "Error"
+                st.session_state["status_rows"][idx]["Progress"] = 0
             st.session_state["processing_errors"].append(
                 f"Error processing {message.get('original_name')}: {message.get('error')}"
             )
@@ -167,6 +170,22 @@ def _drain_result_queue(anonymize, remove_pii, extract_json):
         elif msg_type == "done":
             st.session_state["processing_done"] = True
     return updates
+
+
+def _get_available_downloads():
+    """Retrieve downloadable files from processe_results, sorted by completion time"""
+    if not st.session_state.get("processing_results"):
+        return []
+    
+    # Filter completed results and sort them by processing time
+    available_results = [
+        result for result in st.session_state["processing_results"]
+        if result.get("status") == "Done"
+    ]
+    
+    # Sort by processing time (the most recently completed ones come first)
+    return sorted(available_results, key=lambda x: x.get("processed_time", datetime.min), reverse=True)
+
 
 # Set page configuration
 st.set_page_config(
@@ -190,9 +209,6 @@ inject_custom_css()
 _init_processing_state()
 
 # Hero header
-# Security: The following HTML is static only; avoid interpolating any user input
-# when using unsafe_allow_html=True to prevent XSS.
-
 st.markdown(
     """
     <div class="hero">
@@ -203,8 +219,6 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
-
-# Size limits are configured in config.py
 # Page intro hint
 st.caption(f"Upload up to {MAX_FILES} files (.txt, .docx, .pdf) — we'll handle the rest ✨")
 
@@ -216,6 +230,7 @@ uploaded_files = st.file_uploader(
     accept_multiple_files=True,
     help=f"You can upload up to {MAX_FILES} files of type .txt, .docx, or .pdf"
 )
+
 # Validate size limits
 size_ok = True
 if uploaded_files:
@@ -237,7 +252,6 @@ if uploaded_files:
             )
         )
 
-
 # Limit the number of files
 if uploaded_files and len(uploaded_files) > MAX_FILES:
     st.error(f"You can only upload up to {MAX_FILES} files. Please remove some files.")
@@ -256,7 +270,7 @@ if uploaded_files:
         })
     
     df_files = pd.DataFrame(file_info)
-    st.dataframe(df_files, use_container_width=True, hide_index=True)
+    st.dataframe(df_files, width="stretch", hide_index=True)
 
 # Processing Options
 st.header("2. 🛠️ Processing Options")
@@ -271,7 +285,6 @@ with col3:
 
 # OCR toggle (default ON)
 ocr_enabled = st.toggle("🖼️ OCR for images (PDF/DOCX)", value=True, help="Extract text from images via PaddleOCR with simple heuristics.")
-# Apply OCR setting for local processor contexts (workers get the override via options)
 OCR_CONFIG['enabled'] = bool(ocr_enabled)
 
 # Advanced options expander keeps expert flags tucked away
@@ -315,7 +328,7 @@ st.header('3. Process & Run')
 process_btn = st.button(
     '🚀 Process',
     type='primary',
-    use_container_width=True,
+    width="stretch",
     disabled=st.session_state["processing_started"],
 )
 
@@ -323,8 +336,11 @@ process_btn = st.button(
 if process_btn and not (anonymize or remove_pii or extract_json):
     st.error("❌ Please select at least one processing option (Anonymize, Remove PII, or Extract to JSON)")
 
+# Create progress display container
 progress_placeholder = st.empty()
 status_placeholder = st.empty()
+immediate_download_container = st.container() 
+global_progress_container = st.empty()
 
 if process_btn and uploaded_files and size_ok and (anonymize or remove_pii or extract_json):
     if st.session_state["processing_started"]:
@@ -334,7 +350,16 @@ if process_btn and uploaded_files and size_ok and (anonymize or remove_pii or ex
         st.session_state["processing_errors"] = []
         st.session_state["processing_done"] = False
         st.session_state["processing_total"] = len(uploaded_files)
-        st.session_state["status_rows"] = [{"File": file.name, "Status": "Queued"} for file in uploaded_files]
+        
+        # Initialization status line, including progress field
+        st.session_state["status_rows"] = [
+            {
+                "File": file.name, 
+                "Status": "Queued",
+                "Progress": 0
+            } for file in uploaded_files
+        ]
+        
         batch_options_snapshot = {
             "anonymize": anonymize,
             "remove_pii": remove_pii,
@@ -381,6 +406,7 @@ if process_btn and uploaded_files and size_ok and (anonymize or remove_pii or ex
 
 # Render progress/status and consume queue updates
 processing_active = bool(st.session_state["processing_thread"] and st.session_state["processing_thread"].is_alive())
+
 if st.session_state["processing_started"] or st.session_state["processing_done"]:
     batch_opts = st.session_state.get("processing_batch_options") or {
         "anonymize": anonymize,
@@ -390,164 +416,286 @@ if st.session_state["processing_started"] or st.session_state["processing_done"]
         "verbose_logging": verbose_logging,
         "ocr_enabled": bool(ocr_enabled),
     }
+    
     _drain_result_queue(batch_opts["anonymize"], batch_opts["remove_pii"], batch_opts["extract_json"])
+    
     total_files = st.session_state["processing_total"]
     completed_count = len(st.session_state["processing_results"]) + len(st.session_state["processing_errors"])
-
+    
+    # Display global progress bar
+    if total_files > 0:
+        progress_ratio = completed_count / total_files
+        with global_progress_container.container():
+            st.subheader("📊 Global Progress")
+            progress_bar = st.progress(progress_ratio, text=f"Processed {completed_count}/{total_files} files")
+            
+            # Progress statistics
+            col1, col2, col3, col4 = st.columns(4)
+            with col1:
+                st.metric("Queued", total_files - completed_count)
+            with col2:
+                st.metric("Processing", sum(1 for row in st.session_state["status_rows"] if row["Status"] == "Processing"))
+            with col3:
+                st.metric("Completed", sum(1 for row in st.session_state["status_rows"] if row["Status"] == "Done"))
+            with col4:
+                st.metric("Errors", len(st.session_state["processing_errors"]))
+    
+    # Display detailed progress of each file
     if st.session_state["status_rows"]:
-        status_placeholder.dataframe(
-            pd.DataFrame(st.session_state["status_rows"]),
-            use_container_width=True,
-            hide_index=True,
-        )
+        with status_placeholder.container():
+            st.subheader("📋 File Processing Status")
+            
+            for idx, row in enumerate(st.session_state["status_rows"]):
+                col1, col2, col3, col4 = st.columns([3, 2, 3, 2])
+                with col1:
+                    st.text(f"{row['File'][:30]}..." if len(row['File']) > 30 else row['File'])
+                with col2:
+                    status_color = {
+                        "Queued": "⚪",
+                        "Processing": "🟡",
+                        "Done": "🟢",
+                        "Error": "🔴"
+                    }.get(row["Status"], "⚪")
+                    st.text(f"{status_color} {row['Status']}")
+                with col3:
+                    # Progress bar
+                    progress_val = row.get("Progress", 0)
+                    st.progress(progress_val/100, text=f"{progress_val}%")
+                with col4:
+                    # If the file is completed, display the download button immediately
+                    if row["Status"] == "Done":
+                        # 
+                        result = None
+                        for res in st.session_state["processing_results"]:
+                            if res.get("order") == idx:
+                                result = res
+                                break
+                        
+                        if result:
+                            # Get file size
+                            content = result["content"]
+                            if isinstance(content, bytes):
+                                size_kb = len(content) / 1024
+                            elif isinstance(content, str):
+                                size_kb = len(content.encode('utf-8')) / 1024
+                            else:
+                                size_kb = 0
+                            
+                            mime_type = "application/json" if result["file_extension"] == ".json" else "application/octet-stream"
+                            
+                            # Create download button
+                            st.download_button(
+                                label=f"⬇️ {size_kb:.1f}KB",
+                                data=content,
+                                file_name=result["name"],
+                                mime=mime_type,
+                                key=f"status_dl_{idx}",
+                                help=f"Download {result['name']}"
+                            )
+                    else:
+                        # Display file operations
+                        if idx < len(st.session_state.get("job_operations", [])):
+                            ops = st.session_state["job_operations"][idx]
+                            ops_text = ""
+                            if ops.get("anonymize"):
+                                ops_text += "🛡️"
+                            if ops.get("remove_pii"):
+                                ops_text += "🧹"
+                            if ops.get("extract_json"):
+                                ops_text += "🧾"
+                            st.text(ops_text if ops_text else "—")
+    
+    # Display immediate download area
+    with immediate_download_container:
+        available_downloads = _get_available_downloads()
+        
+        if available_downloads:
+            st.subheader("📥 Immediate Download (Available Now)")
+            st.caption("Files are available for download as soon as they are processed")
+            
+            # Display download button
+            cols_per_row = 3
+            for i in range(0, len(available_downloads), cols_per_row):
+                row_cols = st.columns(cols_per_row)
+                for j in range(cols_per_row):
+                    idx = i + j
+                    if idx < len(available_downloads):
+                        result = available_downloads[idx]
+                        with row_cols[j]:
+                            # Create file card
+                            mime_type = "application/json" if result["file_extension"] == ".json" else "application/octet-stream"
+                            
+                            # Get file size
+                            content = result["content"]
+                            if isinstance(content, bytes):
+                                size_mb = len(content) / 1024 / 1024
+                            elif isinstance(content, str):
+                                size_mb = len(content.encode('utf-8')) / 1024 / 1024
+                            else:
+                                size_mb = 0
+                            
+                            # Create operation label
+                            ops_list = []
+                            ops = result.get("operations", {})
+                            if ops.get("anonymize"):
+                                ops_list.append("A")
+                            if ops.get("remove_pii"):
+                                ops_list.append("P")
+                            if ops.get("extract_json"):
+                                ops_list.append("J")
+                            
+                            ops_str = " | ".join(ops_list) if ops_list else "Raw"
+                            processed_time = result.get("processed_time", datetime.now())
+                            time_str = processed_time.strftime("%H:%M:%S") if isinstance(processed_time, datetime) else str(processed_time)
+                            
+                            # Display files
+                            with st.container():
+                                st.markdown(f"**{result['name'][:20]}...**" if len(result['name']) > 20 else f"**{result['name']}**")
+                                st.caption(f"From: {result['original_name'][:15]}..." if len(result['original_name']) > 15 else f"From: {result['original_name']}")
+                                st.caption(f"Ops: {ops_str} | {size_mb:.2f}MB | {time_str}")
+                                
+                                # Download button
+                                st.download_button(
+                                    label="⬇️ Download",
+                                    data=content,
+                                    file_name=result["name"],
+                                    mime=mime_type,
+                                    key=f"card_dl_{result['order']}_{i}_{j}",
+                                    width="stretch"
+                                )
+    
     if total_files:
         if completed_count < total_files:
-            progress_placeholder.info(f"Processed {completed_count}/{total_files} files…")
+            pass 
         else:
-            progress_placeholder.success(f"Processed {completed_count}/{total_files} files.")
-
+            progress_placeholder.success(f"✅ All {completed_count}/{total_files} files processed successfully!")
+    
     if st.session_state["processing_done"] and not processing_active:
         st.session_state["processing_thread"] = None
         st.session_state["processing_queue"] = None
         st.session_state["processing_started"] = False
+        
+        processed_files = sorted(st.session_state["processing_results"], key=lambda pf: pf["order"])
+        
+        if processed_files:
+            # Final Processing Summary
+            with st.expander("📊 Final Processing Summary", expanded=True):
+                summary_data = []
+                for pf in processed_files:
+                    content = pf["content"]
+                    if isinstance(content, bytes):
+                        content_size = len(content)
+                    elif isinstance(content, str):
+                        content_size = len(content.encode('utf-8'))
+                    else:
+                        content_size = 0
+                    
+                    metadata = pf.get("metadata") or {}
+                    ops = pf.get("operations") or batch_opts
+                    ops_list = []
+                    if ops.get("anonymize"):
+                        ops_list.append("Anonymize")
+                    if ops.get("remove_pii"):
+                        ops_list.append("Remove PII")
+                    if ops.get("extract_json"):
+                        ops_list.append("Extract JSON")
+                    
+                    summary_data.append({
+                        "Original File": pf["original_name"],
+                        "Processed File": pf["name"],
+                        "Output Format": pf["file_extension"],
+                        "Size (KB)": round(content_size / 1024, 2) if content_size else "N/A",
+                        "Cache": "Yes" if metadata.get("cache_hit") else "No",
+                        "Operations": ", ".join(ops_list) if ops_list else "None",
+                    })
+                
+                st.dataframe(pd.DataFrame(summary_data), width="stretch", hide_index=True)
+                effective_terms = batch_opts.get("anonymize_terms", parsed_anonymize_terms)
+                _replace_raw = batch_opts.get("anonymize_replace", anonymize_replace_input)
+                effective_replace = _replace_raw if _replace_raw != "" else " "
+                
+                with st.expander("Processing Details"):
+                    st.write("**Applied Processing Options:**")
+                    st.json({
+                        "Anonymize": batch_opts.get("anonymize", False),
+                        "Remove PII": batch_opts.get("remove_pii", False),
+                        "Extract to JSON": batch_opts.get("extract_json", False),
+                        "Throughput mode": batch_opts.get("throughput_mode", False),
+                        "Verbose logging": batch_opts.get("verbose_logging", False),
+                        "OCR enabled": batch_opts.get("ocr_enabled", False),
+                        "Anonymize terms (effective)": effective_terms,
+                        "Anonymize replace (effective)": effective_replace,
+                    })
 
-    processed_files = sorted(st.session_state["processing_results"], key=lambda pf: pf["order"])
+                    if processed_files and processed_files[0].get("metadata"):
+                        first_meta = processed_files[0]["metadata"]
+                        timing = first_meta.get("timing", {})
+                        st.write(f"**Timing (first file: {processed_files[0]['original_name']})**")
+                        if timing:
+                            timing_rows = [
+                                {"Step": key.replace("_", " ").title(), "Seconds": round(value, 3)}
+                                for key, value in timing.items()
+                            ]
+                            st.dataframe(pd.DataFrame(timing_rows), width="stretch", hide_index=True)
+                        else:
+                            st.info("Timing data not available for this file.")
+                        st.caption(f"Throughput mode applied: {'Yes' if first_meta.get('throughput_mode') else 'No'}")
+                        st.write("**Engine & Cache**")
+                        st.write(f"Cache hit: {'Yes' if first_meta.get('cache_hit') else 'No'}")
+                        pdf_engine = first_meta.get('pdf_engine')
+                        if pdf_engine:
+                            st.write(f"PDF engine: {pdf_engine}")
+                        ocr_meta = first_meta.get("ocr") or {}
+                        if ocr_meta:
+                            st.write("**OCR details**")
+                            st.write(
+                                f"Engine: {ocr_meta.get('engine', 'unknown')} · "
+                                f"Images processed: {ocr_meta.get('images_processed', 0)} · "
+                                f"Skipped: {ocr_meta.get('images_skipped', 0)} "
+                                f"(max per doc: {ocr_meta.get('max_images_per_doc', 'N/A')})"
+                            )
+                        ner_mode = first_meta.get("ner_mode")
+                        if ner_mode:
+                            st.write(f"NER mode: {ner_mode}")
 
-    if processed_files and st.session_state["processing_done"]:
-        st.success(f"✅ Successfully processed {len(processed_files)} files!")
+                    if batch_opts.get("extract_json") and processed_files and isinstance(processed_files[0]["content"], str):
+                        st.write("**JSON Output Preview (first file):**")
+                        try:
+                            json_preview = json.loads(processed_files[0]["content"])
+                            st.json(json_preview)
+                        except:
+                            st.text_area("JSON Content", processed_files[0]["content"][:1000] + "...", height=200)
 
-        st.subheader("Processing Summary")
-        summary_data = []
-        for pf in processed_files:
-            content = pf["content"]
-            if isinstance(content, bytes):
-                content_size = len(content)
-            elif isinstance(content, str):
-                content_size = len(content.encode('utf-8'))
-            else:
-                content_size = 0
-            metadata = pf.get("metadata") or {}
-            ops = pf.get("operations") or batch_opts
-            ops_list = []
-            if ops.get("anonymize"):
-                ops_list.append("Anonymize")
-            if ops.get("remove_pii"):
-                ops_list.append("Remove PII")
-            if ops.get("extract_json"):
-                ops_list.append("Extract JSON")
-            summary_data.append({
-                "Original File": pf["original_name"],
-                "Processed File": pf["name"],
-                "Output Format": pf["file_extension"],
-                "Size (KB)": round(content_size / 1024, 2) if content_size else "N/A",
-                "Cache": "Yes" if metadata.get("cache_hit") else "No",
-                "Ops": ", ".join(ops_list) if ops_list else "None",
-            })
-        st.dataframe(pd.DataFrame(summary_data), use_container_width=True, hide_index=True)
-        effective_terms = batch_opts.get("anonymize_terms", parsed_anonymize_terms)
-        _replace_raw = batch_opts.get("anonymize_replace", anonymize_replace_input)
-        effective_replace = _replace_raw if _replace_raw != "" else " "
-
-
-        with st.expander("Processing Details"):
-            st.write("**Applied Processing Options:**")
-            st.json({
-                "Anonymize": batch_opts.get("anonymize", False),
-                "Remove PII": batch_opts.get("remove_pii", False),
-                "Extract to JSON": batch_opts.get("extract_json", False),
-                "Throughput mode": batch_opts.get("throughput_mode", False),
-                "Verbose logging": batch_opts.get("verbose_logging", False),
-                "OCR enabled": batch_opts.get("ocr_enabled", False),
-                "Anonymize terms (effective)": effective_terms,
-                "Anonymize replace (effective)": effective_replace,
-            })
-
-            if processed_files and processed_files[0].get("metadata"):
-                first_meta = processed_files[0]["metadata"]
-                timing = first_meta.get("timing", {})
-                st.write(f"**Timing (first file: {processed_files[0]['original_name']})**")
-                if timing:
-                    timing_rows = [
-                        {"Step": key.replace("_", " ").title(), "Seconds": round(value, 3)}
-                        for key, value in timing.items()
-                    ]
-                    st.dataframe(pd.DataFrame(timing_rows), use_container_width=True, hide_index=True)
-                else:
-                    st.info("Timing data not available for this file.")
-                st.caption(f"Throughput mode applied: {'Yes' if first_meta.get('throughput_mode') else 'No'}")
-                st.write("**Engine & Cache**")
-                st.write(f"Cache hit: {'Yes' if first_meta.get('cache_hit') else 'No'}")
-                pdf_engine = first_meta.get('pdf_engine')
-                if pdf_engine:
-                    st.write(f"PDF engine: {pdf_engine}")
-                ocr_meta = first_meta.get("ocr") or {}
-                if ocr_meta:
-                    st.write("**OCR details**")
-                    st.write(
-                        f"Engine: {ocr_meta.get('engine', 'unknown')} · "
-                        f"Images processed: {ocr_meta.get('images_processed', 0)} · "
-                        f"Skipped: {ocr_meta.get('images_skipped', 0)} "
-                        f"(max per doc: {ocr_meta.get('max_images_per_doc', 'N/A')})"
-                    )
-                ner_mode = first_meta.get("ner_mode")
-                if ner_mode:
-                    st.write(f"NER mode: {ner_mode}")
-
-            if batch_opts.get("extract_json") and processed_files and isinstance(processed_files[0]["content"], str):
-                st.write("**JSON Output Preview (first file):**")
-                try:
-                    json_preview = json.loads(processed_files[0]["content"])
-                    st.json(json_preview)
-                except:
-                    st.text_area("JSON Content", processed_files[0]["content"][:1000] + "...", height=200)
-
-        zip_buffer = io.BytesIO()
-        with zipfile.ZipFile(zip_buffer, "w") as zip_file:
-            for pf in processed_files:
-                content = pf["content"]
-                if isinstance(content, str):
-                    content = content.encode('utf-8')
-                zip_file.writestr(pf["name"], content)
-
-        zip_buffer.seek(0)
-
-        st.header("4. Download Processed Files")
-        download_filename = f"processed_documents_{datetime.now().strftime('%Y%m%d_%H%M%S')}.zip"
-        st.download_button(
-            label="📥 Download All Processed Files",
-            data=zip_buffer,
-            file_name=download_filename,
-            mime="application/zip",
-            use_container_width=True,
-            help="Download all processed files as a ZIP archive"
-        )
-
-        st.subheader("Download Individual Files")
-        cols = st.columns(3)
-        for idx, pf in enumerate(processed_files):
-            with cols[idx % 3]:
-                mime_type = "application/json" if pf["file_extension"] == ".json" else "application/octet-stream"
+                # Zip download
+                zip_buffer = io.BytesIO()
+                with zipfile.ZipFile(zip_buffer, "w") as zip_file:
+                    for pf in processed_files:
+                        content = pf["content"]
+                        if isinstance(content, str):
+                            content = content.encode('utf-8')
+                        zip_file.writestr(pf["name"], content)
+                
+                zip_buffer.seek(0)
+                
+                st.subheader("📦 Download All Files")
+                download_filename = f"processed_documents_{datetime.now().strftime('%Y%m%d_%H%M%S')}.zip"
                 st.download_button(
-                    label=f"📄 {pf['name']}",
-                    data=pf["content"],
-                    file_name=pf["name"],
-                    mime=mime_type,
-                    key=f"single_{idx}"
+                    label="📥 Download All as ZIP",
+                    data=zip_buffer,
+                    file_name=download_filename,
+                    mime="application/zip",
+                    width="stretch",
+                    help="Download all processed files as a ZIP archive"
                 )
 
-    if st.session_state["processing_errors"]:
-        st.error("Processing Errors:")
-        for error in st.session_state["processing_errors"]:
-            st.write(f"• {error}")
-
     if processing_active:
-        time.sleep(0.2)
+        time.sleep(0.5)
         st.rerun()
 
 elif process_btn and not uploaded_files:
     st.warning("⚠️ Please upload at least one file to process.")
 
-# Sidebar infomation
+# Sidebar information
 with st.sidebar:
     st.header("ℹ️ About")
     st.markdown(f"""
@@ -557,7 +705,7 @@ with st.sidebar:
       - **Anonymize**: Remove personal identifiers
       - **Remove PII**: Remove Personally Identifiable Information
       - **Extract to JSON**: Convert document content to JSON format
-    - Download processed files individually or as a ZIP archive
+    - Download processed files immediately as they complete
     """)
     
     st.header("📊 Statistics")
@@ -569,13 +717,19 @@ with st.sidebar:
             st.metric(label="Files", value=f"{len(uploaded_files)}/{MAX_FILES}")
         with c2:
             st.metric(label="Total size (KB)", value=f"{total_size_kb:.2f}")
-
     else:
         st.write("No files uploaded")
     
     st.header("⚙️ Processing Status")
     if st.session_state["processing_started"] and not st.session_state["processing_done"]:
         st.info("Processing in progress…")
+        
+        # Display real-time statistics
+        completed = len(st.session_state.get("processing_results", []))
+        errors = len(st.session_state.get("processing_errors", []))
+        st.metric("Files Completed", f"{completed}/{st.session_state.get('processing_total', 0)}")
+        if errors > 0:
+            st.metric("Errors", errors, delta=f"-{errors}")
     elif st.session_state["processing_done"]:
         st.success("Processing completed!")
     elif process_btn and not uploaded_files:

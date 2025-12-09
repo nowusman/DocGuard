@@ -331,6 +331,7 @@ OCR_MAX_IMAGES_PER_DOC=10     # Max images to OCR per document
 OCR_RENDER_SCALE=1.25          # PDF render scale for OCR (lower = faster)
 MAX_WORKERS=4                   # Parallel processing workers
 MAX_CACHE_ITEMS=64              # LRU cache size (0 to disable)
+USE_CAMELOT = true             # Enable camelot read table
 
 # Debugging
 VERBOSE_LOGGING=false           # Enable detailed console output

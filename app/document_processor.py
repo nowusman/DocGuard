@@ -38,6 +38,7 @@ from config import (
     PDF_ENGINE,
     OCR_ENGINE,
     MAX_CACHE_ITEMS,
+    USE_CAMELOT,
 )
 
 class DocumentProcessor:
@@ -56,6 +57,8 @@ class DocumentProcessor:
         self.default_anonymize_replace = ""
         self.anonymize_terms = []
         self.anonymize_replace = ""
+        self.use_camelot = USE_CAMELOT
+        self._camelot_available = self._check_camelot_availability()
         # Load spaCy model
         try:
             self.nlp = spacy.load("en_core_web_sm")
@@ -95,6 +98,7 @@ class DocumentProcessor:
             'extract_json': bool(extract_json),
             'throughput_mode': bool(self.throughput_mode),
             'ocr_enabled': bool(OCR_CONFIG.get('enabled', True)),
+            'use_camelot': bool(self.use_camelot),
             'options': options or {}
         }
         hasher.update(json.dumps(normalized, sort_keys=True, default=str).encode('utf-8'))
@@ -123,6 +127,8 @@ class DocumentProcessor:
         metadata['throughput_mode'] = self.throughput_mode
         metadata['cache_hit'] = metadata.get('cache_hit', False)
         metadata['ner_mode'] = 'regex_only' if (self.throughput_mode or not self.nlp) else 'spacy_batch'
+        metadata['camelot_used'] = metadata.get('camelot_used', False)
+        metadata['camelot_available'] = self._camelot_available
         metadata['ocr'] = {
             'engine': self.ocr_engine if self.ocr_available else 'unavailable',
             'images_processed': self._ocr_images_processed,
@@ -165,6 +171,127 @@ class DocumentProcessor:
             self._paddle_ocr = None
             return False
     
+    def _check_camelot_availability(self):
+        """Check if Camelot library is available."""
+        try:
+            import camelot
+            self._log("Camelot library is available.")
+            return True
+        except ImportError:
+            print("Warning: Camelot not available. Install camelot-py[cv] for table extraction.")
+            return False
+        except Exception as exc:
+            print(f"Warning: Camelot check failed: {exc}")
+            return False
+    
+    def _has_table_indicators(self, text: str) -> bool:
+        """
+        Perform fast heuristic check for table indicators in text.
+        Returns True if text contains patterns that suggest tables might be present.
+        """
+        if not text:
+            return False
+        
+        # Common table indicators
+        table_indicators = [
+            # Grid-like patterns
+            r'\|\s*[\w\s]+\s*\|',  # Pipe separators
+            r'\+[-]+\+',  # ASCII table borders
+            r'[\w\s]+\s+\|\s+[\w\s]+',  # Text with pipe separator
+            r'\b(table|tab\.?|tbl)\b',  # Table references
+            # Column-like patterns
+            r'\s{4,}[\w\s]+\s{4,}[\w\s]+',  # Multiple spaces as column separators
+            r'\t+[\w\s]+\t+[\w\s]+',  # Tabs as column separators
+        ]
+        
+        # Check each pattern
+        for pattern in table_indicators:
+            if re.search(pattern, text, re.IGNORECASE):
+                return True
+        
+        # Check for numeric data in rows (potential data tables)
+        lines = text.split('\n')
+        table_like_lines = 0
+        
+        for line in lines[:50]:  # Check first 50 lines only for speed
+            line = line.strip()
+            if not line:
+                continue
+            
+            # Check if line looks like table row
+            # Multiple items separated by consistent delimiters
+            if '|' in line and line.count('|') >= 2:
+                table_like_lines += 1
+            elif len(re.split(r'\s{3,}', line)) >= 3:  # Multiple columns with wide spacing
+                table_like_lines += 1
+            elif re.search(r'\d+[,\d]*\s+\d+[,\d]*', line):  # Multiple numbers
+                table_like_lines += 1
+        
+        # If we found multiple table-like lines, likely has tables
+        return table_like_lines >= 3
+    
+    def _extract_tables_with_camelot(self, file_bytes, page_num=None):
+        """
+        Extract tables using Camelot library.
+        Returns list of tables in same format as PyMuPDF extraction.
+        """
+        if not self._camelot_available:
+            return []
+        
+        tmp_path=None
+        try:
+            import camelot
+            import tempfile
+            import os
+            
+            start_time = perf_counter()
+            tables_data = []
+            # temp_file_bytes = file_bytes
+            # Create temporary file for Camelot
+            with tempfile.NamedTemporaryFile(suffix='.pdf', delete=False) as tmp_file:
+                tmp_file.write(file_bytes)
+                tmp_path = tmp_file.name
+            
+            try:
+                if page_num is not None:
+                    # Extract tables from specific page
+                    tables = camelot.read_pdf(tmp_path, pages=str(page_num + 1), flavor='lattice', line_scale=40)
+                else:
+                    # Extract tables from all pages
+                    tables = camelot.read_pdf(tmp_path, pages='all', flavor='lattice', line_scale=40)
+                
+                for idx, table in enumerate(tables):
+                    if table.parsing_report.get('accuracy', 0) < 50:  # Skip low accuracy tables
+                        continue
+                    
+                    # Convert table to list
+                    table_list = table.df.values.tolist()
+                    
+                    if table_list:  # Only add non-empty tables
+                        tables_data.append({
+                            'table_index': idx,
+                            'data': table_list,
+                            'rows': len(table_list),
+                            'cols': len(table_list[0]) if table_list else 0,
+                            'page': page_num + 1 if page_num is not None else 1,
+                            'extraction_method': 'camelot'
+                        })
+                
+                self._record_timing('camelot_extraction', perf_counter() - start_time)
+                return tables_data
+                
+            finally:
+                # Clean up temporary file
+                if tmp_path and os.path.exists(tmp_path):
+                    try:
+                        os.unlink(tmp_path)
+                    except:
+                        pass
+                    
+        except Exception as exc:
+            self._log(f"Camelot table extraction failed: {exc}")
+            return []
+    
     def process_document(self, file_content, filename, anonymize=False, remove_pii=False, extract_json=False, options=None):
         """
         The main functions for processing documents
@@ -172,6 +299,7 @@ class DocumentProcessor:
         options = dict(options) if options else {}
         self.verbose_logging = options.get('verbose_logging', VERBOSE_LOGGING)
         self.throughput_mode = options.get('throughput_mode', THROUGHPUT_MODE)
+        # self.use_camelot = options.get('use_camelot', False)
         if 'ocr_enabled' in options:
             OCR_CONFIG['enabled'] = bool(options['ocr_enabled'])
         self._set_anonymization_settings(
@@ -206,7 +334,7 @@ class DocumentProcessor:
         elif file_extension == '.docx':
             content, metadata = self._read_docx(file_content)
         elif file_extension == '.pdf':
-            content, metadata = self._read_pdf(file_content)
+            content, metadata = self._read_pdf(file_content, use_camelot=self.use_camelot, extract_json=extract_json)
         else:
             raise ValueError(f"Unsupported file format: {file_extension}")
         
@@ -337,15 +465,15 @@ class DocumentProcessor:
     
 
     #############################3
-    def _read_pdf(self, file_content):
+    def _read_pdf(self, file_content, use_camelot=False, extract_json=False):
         """Entry point for PDF reads with PyMuPDF single-pass."""
         try:
-            return self._read_pdf_optimized(file_content)
+            return self._read_pdf_optimized(file_content, use_camelot=use_camelot, extract_json=extract_json)
         except Exception as exc:
             self._log(f"PyMuPDF single-pass failed, returning text-only fallback: {exc}")
             return self._read_pdf_text_only(file_content)
 
-    def _read_pdf_optimized(self, file_content):
+    def _read_pdf_optimized(self, file_content, use_camelot=False, extract_json=False):
         """Single-pass PDF extraction using PyMuPDF only."""
         read_start = perf_counter()
         text_chunks = []
@@ -371,12 +499,33 @@ class DocumentProcessor:
                 if page_text:
                     text_chunks.append(page_text)
 
-                if not self.throughput_mode:
-                    tables_start = perf_counter()
-                    new_tables, table_index = self._extract_tables_with_pymupdf(page, page_num, table_index)
-                    if new_tables:
-                        tables_data.extend(new_tables)
-                    self._record_timing('table_extraction', perf_counter() - tables_start)
+                # Check if we should attempt table extraction
+                should_extract_tables = not self.throughput_mode
+                
+                if should_extract_tables:
+                    # Fast heuristic check: skip expensive table extraction if no table indicators found
+                    has_table_indicators = self._has_table_indicators(page_text)
+                    
+                    if not has_table_indicators:
+                        self._log(f"Page {page_num + 1}: No table indicators found, skipping table extraction")
+                    else:
+                        self._log(f"Page {page_num + 1}: Table indicators found, proceeding with extraction")
+                        
+                        tables_start = perf_counter()
+                        
+                        # Determine which extraction method to use
+                        if use_camelot and extract_json and not self.throughput_mode and self._camelot_available:
+                            # Use Camelot for table extraction
+                            camelot_tables = self._extract_tables_with_camelot(file_bytes, page_num)
+                            if camelot_tables:
+                                tables_data.extend(camelot_tables)
+                                self._timing['camelot_extraction'] = self._timing.get('camelot_extraction', 0) + (perf_counter() - tables_start)
+                        else:
+                            # Use PyMuPDF for table extraction
+                            new_tables, table_index = self._extract_tables_with_pymupdf(page, page_num, table_index)
+                            if new_tables:
+                                tables_data.extend(new_tables)
+                                self._timing['table_extraction'] = self._timing.get('table_extraction', 0) + (perf_counter() - tables_start)
 
                 page_images = self._extract_images_with_pymupdf(pdf_doc, page, page_num)
                 if page_images:
@@ -388,7 +537,8 @@ class DocumentProcessor:
             'text_content': text,
             'tables': tables_data,
             'images': images_data,
-            'pdf_engine': 'pymupdf_single_pass'
+            'pdf_engine': 'pymupdf_single_pass',
+            'camelot_used': use_camelot and extract_json and not self.throughput_mode and self._camelot_available
         }
         self._record_timing('read_pdf', perf_counter() - read_start)
         return text, metadata
@@ -415,7 +565,8 @@ class DocumentProcessor:
             'text_content': text,
             'tables': [],
             'images': [],
-            'pdf_engine': 'pymupdf_text_only'
+            'pdf_engine': 'pymupdf_text_only',
+            'camelot_used': False
         }
         self._record_timing('read_pdf', perf_counter() - start_time)
         return text, metadata
@@ -449,7 +600,8 @@ class DocumentProcessor:
                     'data': data,
                     'rows': rows,
                     'cols': cols,
-                    'page': page_num + 1
+                    'page': page_num + 1,
+                    'extraction_method': 'pymupdf'
                 })
                 table_offset += 1
         except Exception as exc:
@@ -837,14 +989,45 @@ class DocumentProcessor:
                     if not image_bytes:
                         continue
                     extracted_text = (img_data.get('extracted_text') or '').strip().lower()
-                    if extracted_text in {"stc", "sic"}:
+                    if extracted_text in ["stc", "sic"]:
                         continue
 
                     try:
-                        reader = ImageReader(io.BytesIO(image_bytes))
-                        img = Image(reader, width=400, height=300)
+                        # Create an Image using the BytesIO object
+                        img_stream = io.BytesIO(image_bytes)
+                        
+                        try:
+                            pil_img = PILImage.open(img_stream)
+                            original_width, original_height = pil_img.size
+                            
+                            max_width = 400
+                            if original_width > max_width:
+                                ratio = max_width / original_width
+                                new_height = int(original_height * ratio)
+                                width = max_width
+                                height = new_height
+                            else:
+                                width = original_width
+                                height = original_height
+                                
+                            img_stream.seek(0)
+                        except Exception as img_size_error:
+                            self._log(f"Could not get image dimensions, using default: {img_size_error}")
+                            width = 400
+                            height = 300
+                            img_stream.seek(0)
+                        
+                        img = Image(img_stream, width=width, height=height)
+                        
+                        description = img_data.get('description', '')
+                        if description:
+                            desc_para = Paragraph(f"Image {image_count + 1}: {description}", normal_style)
+                            story.append(desc_para)
+                            story.append(Spacer(1, 3))
+                        
                         story.append(img)
                         story.append(Spacer(1, 6))
+                        
                         story.append(Spacer(1, 12))
                         image_count += 1
                     except Exception as img_error:
@@ -1217,7 +1400,8 @@ class DocumentProcessor:
             if xref is not None:
                 pix = fitz.Pixmap(doc, xref)
                 try:
-                    pix = fitz.Pixmap(fitz.csGRAY, pix)
+                    # pix = fitz.Pixmap(fitz.csGRAY, pix)
+                    pix = fitz.Pixmap(fitz.csRGB, pix)
                 except Exception:
                     if pix.n - pix.alpha > 3:  # Change CMYK to RGB as fallback
                         pix = fitz.Pixmap(fitz.csRGB, pix)
