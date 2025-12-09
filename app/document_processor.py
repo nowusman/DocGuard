@@ -269,7 +269,7 @@ class DocumentProcessor:
                     
                     if table_list:  # Only add non-empty tables
                         tables_data.append({
-                            'table_index': idx - 1,
+                            'table_index': idx,
                             'data': table_list,
                             'rows': len(table_list),
                             'cols': len(table_list[0]) if table_list else 0,

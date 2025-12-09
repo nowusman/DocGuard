@@ -105,8 +105,6 @@ def _init_processing_state():
         "processing_done": False,
         "processing_batch_options": None,
         "job_operations": [],
-        "immediate_download_buttons": {},  
-        "download_buttons_rendered": False,  
     }
     for key, value in defaults.items():
         if key not in st.session_state:
@@ -136,9 +134,8 @@ def _drain_result_queue(anonymize, remove_pii, extract_json):
         )
         if msg_type == "status" and idx is not None and idx < len(st.session_state["status_rows"]):
             st.session_state["status_rows"][idx]["Status"] = message.get("status", "Processing")
-            # Progress update
             if "Progress" in st.session_state["status_rows"][idx]:
-                st.session_state["status_rows"][idx]["Progress"] = 50  # Progressing
+                st.session_state["status_rows"][idx]["Progress"] = 50
         elif msg_type == "result":
             output_filename = _derive_output_name(
                 message["original_name"], ops["anonymize"], ops["remove_pii"], ops["extract_json"]
@@ -152,22 +149,14 @@ def _drain_result_queue(anonymize, remove_pii, extract_json):
                 "order": message.get("order", idx),
                 "operations": ops,
                 "processed_time": datetime.now(),
+                "status": "Done",
             }
+
             st.session_state["processing_results"].append(result_data)
-            
-            # Store download button data
-            st.session_state["immediate_download_buttons"][idx] = {
-                "filename": output_filename,
-                "content": message["content"],
-                "file_extension": message["extension"],
-                "original_name": message["original_name"],
-                "operations": ops,
-                "processed_time": datetime.now().strftime("%H:%M:%S")
-            }
             
             if idx is not None and idx < len(st.session_state["status_rows"]):
                 st.session_state["status_rows"][idx]["Status"] = "Done"
-                st.session_state["status_rows"][idx]["Progress"] = 100  
+                st.session_state["status_rows"][idx]["Progress"] = 100
                 
             updates += 1
         elif msg_type == "error":
@@ -181,6 +170,21 @@ def _drain_result_queue(anonymize, remove_pii, extract_json):
         elif msg_type == "done":
             st.session_state["processing_done"] = True
     return updates
+
+
+def _get_available_downloads():
+    """Retrieve downloadable files from processe_results, sorted by completion time"""
+    if not st.session_state.get("processing_results"):
+        return []
+    
+    # Filter completed results and sort them by processing time
+    available_results = [
+        result for result in st.session_state["processing_results"]
+        if result.get("status") == "Done"
+    ]
+    
+    # Sort by processing time (the most recently completed ones come first)
+    return sorted(available_results, key=lambda x: x.get("processed_time", datetime.min), reverse=True)
 
 
 # Set page configuration
@@ -346,8 +350,6 @@ if process_btn and uploaded_files and size_ok and (anonymize or remove_pii or ex
         st.session_state["processing_errors"] = []
         st.session_state["processing_done"] = False
         st.session_state["processing_total"] = len(uploaded_files)
-        st.session_state["immediate_download_buttons"] = {}  
-        st.session_state["download_buttons_rendered"] = False
         
         # Initialization status line, including progress field
         st.session_state["status_rows"] = [
@@ -456,33 +458,40 @@ if st.session_state["processing_started"] or st.session_state["processing_done"]
                     }.get(row["Status"], "⚪")
                     st.text(f"{status_color} {row['Status']}")
                 with col3:
-                    # progress bar
+                    # Progress bar
                     progress_val = row.get("Progress", 0)
                     st.progress(progress_val/100, text=f"{progress_val}%")
                 with col4:
                     # If the file is completed, display the download button immediately
-                    if row["Status"] == "Done" and idx in st.session_state["immediate_download_buttons"]:
-                        dl_data = st.session_state["immediate_download_buttons"][idx]
-                        mime_type = "application/json" if dl_data["file_extension"] == ".json" else "application/octet-stream"
+                    if row["Status"] == "Done":
+                        # 
+                        result = None
+                        for res in st.session_state["processing_results"]:
+                            if res.get("order") == idx:
+                                result = res
+                                break
                         
-                        # Get file size
-                        content = dl_data["content"]
-                        if isinstance(content, bytes):
-                            size_kb = len(content) / 1024
-                        elif isinstance(content, str):
-                            size_kb = len(content.encode('utf-8')) / 1024
-                        else:
-                            size_kb = 0
-                        
-                        # Create download button
-                        st.download_button(
-                            label=f"⬇️ {size_kb:.1f}KB",
-                            data=content,
-                            file_name=dl_data["filename"],
-                            mime=mime_type,
-                            key=f"immediate_dl_{idx}",
-                            help=f"Download {dl_data['filename']}"
-                        )
+                        if result:
+                            # Get file size
+                            content = result["content"]
+                            if isinstance(content, bytes):
+                                size_kb = len(content) / 1024
+                            elif isinstance(content, str):
+                                size_kb = len(content.encode('utf-8')) / 1024
+                            else:
+                                size_kb = 0
+                            
+                            mime_type = "application/json" if result["file_extension"] == ".json" else "application/octet-stream"
+                            
+                            # Create download button
+                            st.download_button(
+                                label=f"⬇️ {size_kb:.1f}KB",
+                                data=content,
+                                file_name=result["name"],
+                                mime=mime_type,
+                                key=f"status_dl_{idx}",
+                                help=f"Download {result['name']}"
+                            )
                     else:
                         # Display file operations
                         if idx < len(st.session_state.get("job_operations", [])):
@@ -498,30 +507,26 @@ if st.session_state["processing_started"] or st.session_state["processing_done"]
     
     # Display immediate download area
     with immediate_download_container:
-        if st.session_state["immediate_download_buttons"]:
+        available_downloads = _get_available_downloads()
+        
+        if available_downloads:
             st.subheader("📥 Immediate Download (Available Now)")
             st.caption("Files are available for download as soon as they are processed")
             
-            # Sort by completion time
-            sorted_downloads = sorted(
-                st.session_state["immediate_download_buttons"].items(),
-                key=lambda x: x[1].get("processed_time", "")
-            )
-            
-            # Display download buttons by column
+            # Display download button
             cols_per_row = 3
-            for i in range(0, len(sorted_downloads), cols_per_row):
+            for i in range(0, len(available_downloads), cols_per_row):
                 row_cols = st.columns(cols_per_row)
                 for j in range(cols_per_row):
                     idx = i + j
-                    if idx < len(sorted_downloads):
-                        key, dl_data = sorted_downloads[idx]
+                    if idx < len(available_downloads):
+                        result = available_downloads[idx]
                         with row_cols[j]:
                             # Create file card
-                            mime_type = "application/json" if dl_data["file_extension"] == ".json" else "application/octet-stream"
+                            mime_type = "application/json" if result["file_extension"] == ".json" else "application/octet-stream"
                             
                             # Get file size
-                            content = dl_data["content"]
+                            content = result["content"]
                             if isinstance(content, bytes):
                                 size_mb = len(content) / 1024 / 1024
                             elif isinstance(content, str):
@@ -531,7 +536,7 @@ if st.session_state["processing_started"] or st.session_state["processing_done"]
                             
                             # Create operation label
                             ops_list = []
-                            ops = dl_data.get("operations", {})
+                            ops = result.get("operations", {})
                             if ops.get("anonymize"):
                                 ops_list.append("A")
                             if ops.get("remove_pii"):
@@ -540,21 +545,23 @@ if st.session_state["processing_started"] or st.session_state["processing_done"]
                                 ops_list.append("J")
                             
                             ops_str = " | ".join(ops_list) if ops_list else "Raw"
+                            processed_time = result.get("processed_time", datetime.now())
+                            time_str = processed_time.strftime("%H:%M:%S") if isinstance(processed_time, datetime) else str(processed_time)
                             
                             # Display files
                             with st.container():
-                                st.markdown(f"**{dl_data['filename'][:20]}...**" if len(dl_data['filename']) > 20 else f"**{dl_data['filename']}**")
-                                st.caption(f"From: {dl_data['original_name'][:15]}..." if len(dl_data['original_name']) > 15 else f"From: {dl_data['original_name']}")
-                                st.caption(f"Ops: {ops_str} | {size_mb:.2f}MB | {dl_data.get('processed_time', '')}")
+                                st.markdown(f"**{result['name'][:20]}...**" if len(result['name']) > 20 else f"**{result['name']}**")
+                                st.caption(f"From: {result['original_name'][:15]}..." if len(result['original_name']) > 15 else f"From: {result['original_name']}")
+                                st.caption(f"Ops: {ops_str} | {size_mb:.2f}MB | {time_str}")
                                 
                                 # Download button
                                 st.download_button(
                                     label="⬇️ Download",
                                     data=content,
-                                    file_name=dl_data["filename"],
+                                    file_name=result["name"],
                                     mime=mime_type,
-                                    key=f"card_dl_{key}",
-                                    use_container_width=True
+                                    key=f"card_dl_{result['order']}_{i}_{j}",
+                                    width="stretch"
                                 )
     
     if total_files:
@@ -603,7 +610,62 @@ if st.session_state["processing_started"] or st.session_state["processing_done"]
                     })
                 
                 st.dataframe(pd.DataFrame(summary_data), width="stretch", hide_index=True)
+                effective_terms = batch_opts.get("anonymize_terms", parsed_anonymize_terms)
+                _replace_raw = batch_opts.get("anonymize_replace", anonymize_replace_input)
+                effective_replace = _replace_raw if _replace_raw != "" else " "
                 
+                with st.expander("Processing Details"):
+                    st.write("**Applied Processing Options:**")
+                    st.json({
+                        "Anonymize": batch_opts.get("anonymize", False),
+                        "Remove PII": batch_opts.get("remove_pii", False),
+                        "Extract to JSON": batch_opts.get("extract_json", False),
+                        "Throughput mode": batch_opts.get("throughput_mode", False),
+                        "Verbose logging": batch_opts.get("verbose_logging", False),
+                        "OCR enabled": batch_opts.get("ocr_enabled", False),
+                        "Anonymize terms (effective)": effective_terms,
+                        "Anonymize replace (effective)": effective_replace,
+                    })
+
+                    if processed_files and processed_files[0].get("metadata"):
+                        first_meta = processed_files[0]["metadata"]
+                        timing = first_meta.get("timing", {})
+                        st.write(f"**Timing (first file: {processed_files[0]['original_name']})**")
+                        if timing:
+                            timing_rows = [
+                                {"Step": key.replace("_", " ").title(), "Seconds": round(value, 3)}
+                                for key, value in timing.items()
+                            ]
+                            st.dataframe(pd.DataFrame(timing_rows), width="stretch", hide_index=True)
+                        else:
+                            st.info("Timing data not available for this file.")
+                        st.caption(f"Throughput mode applied: {'Yes' if first_meta.get('throughput_mode') else 'No'}")
+                        st.write("**Engine & Cache**")
+                        st.write(f"Cache hit: {'Yes' if first_meta.get('cache_hit') else 'No'}")
+                        pdf_engine = first_meta.get('pdf_engine')
+                        if pdf_engine:
+                            st.write(f"PDF engine: {pdf_engine}")
+                        ocr_meta = first_meta.get("ocr") or {}
+                        if ocr_meta:
+                            st.write("**OCR details**")
+                            st.write(
+                                f"Engine: {ocr_meta.get('engine', 'unknown')} · "
+                                f"Images processed: {ocr_meta.get('images_processed', 0)} · "
+                                f"Skipped: {ocr_meta.get('images_skipped', 0)} "
+                                f"(max per doc: {ocr_meta.get('max_images_per_doc', 'N/A')})"
+                            )
+                        ner_mode = first_meta.get("ner_mode")
+                        if ner_mode:
+                            st.write(f"NER mode: {ner_mode}")
+
+                    if batch_opts.get("extract_json") and processed_files and isinstance(processed_files[0]["content"], str):
+                        st.write("**JSON Output Preview (first file):**")
+                        try:
+                            json_preview = json.loads(processed_files[0]["content"])
+                            st.json(json_preview)
+                        except:
+                            st.text_area("JSON Content", processed_files[0]["content"][:1000] + "...", height=200)
+
                 # Zip download
                 zip_buffer = io.BytesIO()
                 with zipfile.ZipFile(zip_buffer, "w") as zip_file:
