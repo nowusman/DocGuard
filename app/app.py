@@ -56,20 +56,136 @@ def _parse_anonymize_terms_input(raw_terms: str) -> list:
     return terms
 
 
-def _run_background_batch(jobs, worker_count, result_queue):
+class CancellableExecutor:
+    """Cancellable actuator wrapper"""
+    def __init__(self, max_workers):
+        self.max_workers = max_workers
+        self.executor = None
+        self.futures = []
+        self.cancelled = False
+        self.lock = threading.Lock()
+        
+    def __enter__(self):
+        self.executor = ProcessPoolExecutor(max_workers=self.max_workers)
+        return self
+    
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        if self.executor:
+            self.executor.shutdown(wait=True)
+    
+    def submit(self, fn, *args, **kwargs):
+        """Submit task, return None if cancelled"""
+        with self.lock:
+            if self.cancelled:
+                return None
+            if self.executor:
+                future = self.executor.submit(fn, *args, **kwargs)
+                self.futures.append(future)
+                return future
+        return None
+    
+    def cancel_all(self):
+        """Cancel all unfinished tasks"""
+        with self.lock:
+            self.cancelled = True
+            cancelled_count = 0
+            for future in self.futures:
+                if not future.done():
+                    future.cancel()
+                    cancelled_count += 1
+            return cancelled_count
+
+
+def _run_background_batch(jobs, worker_count, result_queue, cancel_flag):
     """Run ProcessPool work in a background thread and stream updates into a queue."""
-    with ProcessPoolExecutor(max_workers=worker_count) as executor:
+    with CancellableExecutor(max_workers=worker_count) as executor:
         future_to_idx = {}
+        submitted_count = 0
+        
+        # Submit the first batch of tasks (up to workr_count)
         for idx, job in enumerate(jobs):
+            # Check cancel flag
+            if cancel_flag.get("cancel_requested", False):
+                # Mark remaining tasks as cancelled
+                for j in range(idx, len(jobs)):
+                    result_queue.put({
+                        "type": "cancel",
+                        "index": j,
+                        "original_name": jobs[j]["original_name"]
+                    })
+                break
+            
+            # Submit task
             future = executor.submit(_process_file_worker, job["payload"])
+            if future is None:  
+                break
+                
             future_to_idx[future] = idx
             result_queue.put({"type": "status", "index": idx, "status": "Processing"})
-
-        for future in as_completed(future_to_idx):
-            idx = future_to_idx[future]
+            submitted_count += 1
+            
+            # If the maximum number of parallelism has been reached, 
+            # wait for some tasks to be completed before continuing to submit
+            if len(future_to_idx) >= worker_count:
+                # Waiting for at least one task to be completed
+                for completed_future in as_completed(future_to_idx.keys()):
+                    # Process completed tasks
+                    idx = future_to_idx.pop(completed_future)
+                    job = jobs[idx]
+                    try:
+                        processed_content, file_extension, metadata = completed_future.result()
+                        result_queue.put(
+                            {
+                                "type": "result",
+                                "index": idx,
+                                "original_name": job["original_name"],
+                                "order": job["order"],
+                                "content": processed_content,
+                                "extension": file_extension,
+                                "metadata": metadata,
+                            }
+                        )
+                    except Exception as exc:
+                        result_queue.put(
+                            {
+                                "type": "error",
+                                "index": idx,
+                                "original_name": job["original_name"],
+                                "error": str(exc),
+                            }
+                        )
+                    break  # Continue submitting new tasks after completing one task
+        
+        # Process the remaining submitted tasks
+        for completed_future in as_completed(list(future_to_idx.keys())):
+            # Check cancel flag
+            if cancel_flag.get("cancel_requested", False):
+                # Cancel remaining tasks
+                cancelled = executor.cancel_all()
+                if cancelled > 0:
+                    # Mark remaining tasks as cancelled
+                    for idx in future_to_idx.values():
+                        if idx < len(jobs):
+                            result_queue.put({
+                                "type": "cancel",
+                                "index": idx,
+                                "original_name": jobs[idx]["original_name"]
+                            })
+                    result_queue.put({
+                        "type": "cancelled", 
+                        "submitted": submitted_count, 
+                        "total": len(jobs),
+                        "cancelled": cancelled
+                    })
+                break
+                
+            idx = future_to_idx.pop(completed_future, None)
+            if idx is None:
+                continue
+                
             job = jobs[idx]
             try:
-                processed_content, file_extension, metadata = future.result()
+                processed_content, file_extension, metadata = completed_future.result()
                 result_queue.put(
                     {
                         "type": "result",
@@ -90,7 +206,10 @@ def _run_background_batch(jobs, worker_count, result_queue):
                         "error": str(exc),
                     }
                 )
-    result_queue.put({"type": "done"})
+        
+        # If all tasks are completed normally
+        if not cancel_flag.get("cancel_requested", False):
+            result_queue.put({"type": "done"})
 
 
 def _init_processing_state():
@@ -105,6 +224,10 @@ def _init_processing_state():
         "processing_done": False,
         "processing_batch_options": None,
         "job_operations": [],
+        "cancel_requested": False,
+        "cancel_flag": {"cancel_requested": False},
+        "processing_cancelled": False,
+        "processing_paused": False, 
     }
     for key, value in defaults.items():
         if key not in st.session_state:
@@ -132,10 +255,31 @@ def _drain_result_queue(anonymize, remove_pii, extract_json):
             if idx is not None and idx < len(job_ops)
             else {"anonymize": anonymize, "remove_pii": remove_pii, "extract_json": extract_json}
         )
+        
         if msg_type == "status" and idx is not None and idx < len(st.session_state["status_rows"]):
             st.session_state["status_rows"][idx]["Status"] = message.get("status", "Processing")
             if "Progress" in st.session_state["status_rows"][idx]:
                 st.session_state["status_rows"][idx]["Progress"] = 50
+        
+        elif msg_type == "cancel":
+            # Processing cancelled tasks
+            if idx is not None and idx < len(st.session_state["status_rows"]):
+                if st.session_state["status_rows"][idx]["Status"] in ["Queued", "Processing"]:
+                    st.session_state["status_rows"][idx]["Status"] = "Cancelled"
+                    st.session_state["status_rows"][idx]["Progress"] = 0
+            updates += 1
+        
+        elif msg_type == "cancelled":
+            # Process batch cancel
+            st.session_state["processing_cancelled"] = True
+            submitted = message.get("submitted", 0)
+            total = message.get("total", 0)
+            cancelled = message.get("cancelled", 0)
+            st.session_state["processing_errors"].append(
+                f"Processing cancelled by user. {submitted - cancelled} files were processed, {cancelled} files were cancelled."
+            )
+            updates += 1
+        
         elif msg_type == "result":
             output_filename = _derive_output_name(
                 message["original_name"], ops["anonymize"], ops["remove_pii"], ops["extract_json"]
@@ -159,6 +303,7 @@ def _drain_result_queue(anonymize, remove_pii, extract_json):
                 st.session_state["status_rows"][idx]["Progress"] = 100
                 
             updates += 1
+        
         elif msg_type == "error":
             if idx is not None and idx < len(st.session_state["status_rows"]):
                 st.session_state["status_rows"][idx]["Status"] = "Error"
@@ -167,8 +312,10 @@ def _drain_result_queue(anonymize, remove_pii, extract_json):
                 f"Error processing {message.get('original_name')}: {message.get('error')}"
             )
             updates += 1
+        
         elif msg_type == "done":
             st.session_state["processing_done"] = True
+    
     return updates
 
 
@@ -185,6 +332,22 @@ def _get_available_downloads():
     
     # Sort by processing time (the most recently completed ones come first)
     return sorted(available_results, key=lambda x: x.get("processed_time", datetime.min), reverse=True)
+
+
+def _cancel_processing():
+    """Cancel the current processing batch."""
+    if st.session_state.get("processing_started") and not st.session_state.get("processing_done"):
+        st.session_state["cancel_requested"] = True
+        st.session_state["cancel_flag"]["cancel_requested"] = True
+        st.session_state["processing_cancelled"] = True
+        
+        # Update the status of all pending tasks
+        for idx, row in enumerate(st.session_state["status_rows"]):
+            if row["Status"] in ["Queued", "Processing"]:
+                st.session_state["status_rows"][idx]["Status"] = "Cancelled"
+                st.session_state["status_rows"][idx]["Progress"] = 0
+        
+        st.info("🛑 Processing cancellation requested. Stopping remaining tasks...")
 
 
 # Set page configuration
@@ -325,12 +488,25 @@ processing_overrides = {
 
 # Process
 st.header('3. Process & Run')
-process_btn = st.button(
-    '🚀 Process',
-    type='primary',
-    width="stretch",
-    disabled=st.session_state["processing_started"],
-)
+col1, col2 = st.columns([3, 1])
+
+with col1:
+    process_btn = st.button(
+        '🚀 Process',
+        type='primary',
+        width="stretch",
+        disabled=st.session_state["processing_started"] and not st.session_state["processing_done"],
+    )
+
+with col2:
+    # Display stop button (only displayed when processing is in progress and incomplete)
+    if st.session_state["processing_started"] and not st.session_state["processing_done"]:
+        stop_btn = st.button(
+            '🛑 Stop Processing',
+            type='secondary',
+            width="stretch",
+            on_click=_cancel_processing,
+        )
 
 # Validate processing options
 if process_btn and not (anonymize or remove_pii or extract_json):
@@ -343,12 +519,16 @@ immediate_download_container = st.container()
 global_progress_container = st.empty()
 
 if process_btn and uploaded_files and size_ok and (anonymize or remove_pii or extract_json):
-    if st.session_state["processing_started"]:
-        st.info("Processing is already running. Please wait for it to finish.")
+    if st.session_state["processing_started"] and not st.session_state["processing_done"]:
+        st.info("Processing is already running. Please wait for it to finish or stop it first.")
     else:
+        # Reset state
         st.session_state["processing_results"] = []
         st.session_state["processing_errors"] = []
         st.session_state["processing_done"] = False
+        st.session_state["processing_cancelled"] = False
+        st.session_state["cancel_requested"] = False
+        st.session_state["cancel_flag"] = {"cancel_requested": False}
         st.session_state["processing_total"] = len(uploaded_files)
         
         # Initialization status line, including progress field
@@ -395,7 +575,7 @@ if process_btn and uploaded_files and size_ok and (anonymize or remove_pii or ex
         result_queue = queue.Queue()
         background_thread = threading.Thread(
             target=_run_background_batch,
-            args=(jobs, worker_count, result_queue),
+            args=(jobs, worker_count, result_queue, st.session_state["cancel_flag"]),
             daemon=True,
         )
         background_thread.start()
@@ -420,25 +600,36 @@ if st.session_state["processing_started"] or st.session_state["processing_done"]
     _drain_result_queue(batch_opts["anonymize"], batch_opts["remove_pii"], batch_opts["extract_json"])
     
     total_files = st.session_state["processing_total"]
-    completed_count = len(st.session_state["processing_results"]) + len(st.session_state["processing_errors"])
+    completed_count = len(st.session_state["processing_results"])
+    error_count = len(st.session_state["processing_errors"])
+    cancelled_count = sum(1 for row in st.session_state["status_rows"] if row["Status"] == "Cancelled")
+    processing_count = sum(1 for row in st.session_state["status_rows"] if row["Status"] == "Processing")
+    queued_count = sum(1 for row in st.session_state["status_rows"] if row["Status"] == "Queued")
+    
+    # If the processing is cancelled, display the cancellation status
+    if st.session_state.get("processing_cancelled"):
+        with global_progress_container.container():
+            st.warning(f"🛑 Processing cancelled by user. {completed_count} files processed, {cancelled_count} files cancelled.")
     
     # Display global progress bar
-    if total_files > 0:
-        progress_ratio = completed_count / total_files
+    elif total_files > 0:
+        progress_ratio = (completed_count + error_count + cancelled_count) / total_files
         with global_progress_container.container():
             st.subheader("📊 Global Progress")
-            progress_bar = st.progress(progress_ratio, text=f"Processed {completed_count}/{total_files} files")
+            progress_bar = st.progress(min(progress_ratio, 1.0), text=f"Processed {completed_count}/{total_files} files")
             
             # Progress statistics
-            col1, col2, col3, col4 = st.columns(4)
+            col1, col2, col3, col4, col5 = st.columns(5)
             with col1:
-                st.metric("Queued", total_files - completed_count)
+                st.metric("Queued", queued_count)
             with col2:
-                st.metric("Processing", sum(1 for row in st.session_state["status_rows"] if row["Status"] == "Processing"))
+                st.metric("Processing", processing_count)
             with col3:
-                st.metric("Completed", sum(1 for row in st.session_state["status_rows"] if row["Status"] == "Done"))
+                st.metric("Completed", completed_count)
             with col4:
-                st.metric("Errors", len(st.session_state["processing_errors"]))
+                st.metric("Errors", error_count)
+            with col5:
+                st.metric("Cancelled", cancelled_count)
     
     # Display detailed progress of each file
     if st.session_state["status_rows"]:
@@ -454,7 +645,8 @@ if st.session_state["processing_started"] or st.session_state["processing_done"]
                         "Queued": "⚪",
                         "Processing": "🟡",
                         "Done": "🟢",
-                        "Error": "🔴"
+                        "Error": "🔴",
+                        "Cancelled": "⚫"
                     }.get(row["Status"], "⚪")
                     st.text(f"{status_color} {row['Status']}")
                 with col3:
@@ -493,8 +685,10 @@ if st.session_state["processing_started"] or st.session_state["processing_done"]
                                 help=f"Download {result['name']}"
                             )
                     else:
-                        # Display file operations
-                        if idx < len(st.session_state.get("job_operations", [])):
+                        # Display file operations or cancelled status
+                        if row["Status"] == "Cancelled":
+                            st.text("🚫")
+                        elif idx < len(st.session_state.get("job_operations", [])):
                             ops = st.session_state["job_operations"][idx]
                             ops_text = ""
                             if ops.get("anonymize"):
@@ -565,8 +759,10 @@ if st.session_state["processing_started"] or st.session_state["processing_done"]
                                 )
     
     if total_files:
-        if completed_count < total_files:
+        if completed_count < total_files and not st.session_state["processing_cancelled"]:
             pass 
+        elif st.session_state["processing_cancelled"]:
+            progress_placeholder.warning(f"🛑 Processing cancelled. {completed_count} of {total_files} files were processed.")
         else:
             progress_placeholder.success(f"✅ All {completed_count}/{total_files} files processed successfully!")
     
@@ -579,114 +775,169 @@ if st.session_state["processing_started"] or st.session_state["processing_done"]
         
         if processed_files:
             # Final Processing Summary
-            with st.expander("📊 Final Processing Summary", expanded=True):
-                summary_data = []
-                for pf in processed_files:
-                    content = pf["content"]
-                    if isinstance(content, bytes):
-                        content_size = len(content)
-                    elif isinstance(content, str):
-                        content_size = len(content.encode('utf-8'))
-                    else:
-                        content_size = 0
-                    
-                    metadata = pf.get("metadata") or {}
-                    ops = pf.get("operations") or batch_opts
-                    ops_list = []
-                    if ops.get("anonymize"):
-                        ops_list.append("Anonymize")
-                    if ops.get("remove_pii"):
-                        ops_list.append("Remove PII")
-                    if ops.get("extract_json"):
-                        ops_list.append("Extract JSON")
-                    
-                    summary_data.append({
-                        "Original File": pf["original_name"],
-                        "Processed File": pf["name"],
-                        "Output Format": pf["file_extension"],
-                        "Size (KB)": round(content_size / 1024, 2) if content_size else "N/A",
-                        "Cache": "Yes" if metadata.get("cache_hit") else "No",
-                        "Operations": ", ".join(ops_list) if ops_list else "None",
-                    })
-                
-                st.dataframe(pd.DataFrame(summary_data), width="stretch", hide_index=True)
-                effective_terms = batch_opts.get("anonymize_terms", parsed_anonymize_terms)
-                _replace_raw = batch_opts.get("anonymize_replace", anonymize_replace_input)
-                effective_replace = _replace_raw if _replace_raw != "" else " "
-                
-                with st.expander("Processing Details"):
-                    st.write("**Applied Processing Options:**")
-                    st.json({
-                        "Anonymize": batch_opts.get("anonymize", False),
-                        "Remove PII": batch_opts.get("remove_pii", False),
-                        "Extract to JSON": batch_opts.get("extract_json", False),
-                        "Throughput mode": batch_opts.get("throughput_mode", False),
-                        "Verbose logging": batch_opts.get("verbose_logging", False),
-                        "OCR enabled": batch_opts.get("ocr_enabled", False),
-                        "Anonymize terms (effective)": effective_terms,
-                        "Anonymize replace (effective)": effective_replace,
-                    })
-
-                    if processed_files and processed_files[0].get("metadata"):
-                        first_meta = processed_files[0]["metadata"]
-                        timing = first_meta.get("timing", {})
-                        st.write(f"**Timing (first file: {processed_files[0]['original_name']})**")
-                        if timing:
-                            timing_rows = [
-                                {"Step": key.replace("_", " ").title(), "Seconds": round(value, 3)}
-                                for key, value in timing.items()
-                            ]
-                            st.dataframe(pd.DataFrame(timing_rows), width="stretch", hide_index=True)
-                        else:
-                            st.info("Timing data not available for this file.")
-                        st.caption(f"Throughput mode applied: {'Yes' if first_meta.get('throughput_mode') else 'No'}")
-                        st.write("**Engine & Cache**")
-                        st.write(f"Cache hit: {'Yes' if first_meta.get('cache_hit') else 'No'}")
-                        pdf_engine = first_meta.get('pdf_engine')
-                        if pdf_engine:
-                            st.write(f"PDF engine: {pdf_engine}")
-                        ocr_meta = first_meta.get("ocr") or {}
-                        if ocr_meta:
-                            st.write("**OCR details**")
-                            st.write(
-                                f"Engine: {ocr_meta.get('engine', 'unknown')} · "
-                                f"Images processed: {ocr_meta.get('images_processed', 0)} · "
-                                f"Skipped: {ocr_meta.get('images_skipped', 0)} "
-                                f"(max per doc: {ocr_meta.get('max_images_per_doc', 'N/A')})"
-                            )
-                        ner_mode = first_meta.get("ner_mode")
-                        if ner_mode:
-                            st.write(f"NER mode: {ner_mode}")
-
-                    if batch_opts.get("extract_json") and processed_files and isinstance(processed_files[0]["content"], str):
-                        st.write("**JSON Output Preview (first file):**")
-                        try:
-                            json_preview = json.loads(processed_files[0]["content"])
-                            st.json(json_preview)
-                        except:
-                            st.text_area("JSON Content", processed_files[0]["content"][:1000] + "...", height=200)
-
-                # Zip download
-                zip_buffer = io.BytesIO()
-                with zipfile.ZipFile(zip_buffer, "w") as zip_file:
+            if not st.session_state.get("processing_cancelled"):
+                with st.expander("📊 Final Processing Summary", expanded=True):
+                    summary_data = []
                     for pf in processed_files:
                         content = pf["content"]
-                        if isinstance(content, str):
-                            content = content.encode('utf-8')
-                        zip_file.writestr(pf["name"], content)
-                
-                zip_buffer.seek(0)
-                
-                st.subheader("📦 Download All Files")
-                download_filename = f"processed_documents_{datetime.now().strftime('%Y%m%d_%H%M%S')}.zip"
-                st.download_button(
-                    label="📥 Download All as ZIP",
-                    data=zip_buffer,
-                    file_name=download_filename,
-                    mime="application/zip",
-                    width="stretch",
-                    help="Download all processed files as a ZIP archive"
-                )
+                        if isinstance(content, bytes):
+                            content_size = len(content)
+                        elif isinstance(content, str):
+                            content_size = len(content.encode('utf-8'))
+                        else:
+                            content_size = 0
+                        
+                        metadata = pf.get("metadata") or {}
+                        ops = pf.get("operations") or batch_opts
+                        ops_list = []
+                        if ops.get("anonymize"):
+                            ops_list.append("Anonymize")
+                        if ops.get("remove_pii"):
+                            ops_list.append("Remove PII")
+                        if ops.get("extract_json"):
+                            ops_list.append("Extract JSON")
+                        
+                        summary_data.append({
+                            "Original File": pf["original_name"],
+                            "Processed File": pf["name"],
+                            "Output Format": pf["file_extension"],
+                            "Size (KB)": round(content_size / 1024, 2) if content_size else "N/A",
+                            "Cache": "Yes" if metadata.get("cache_hit") else "No",
+                            "Operations": ", ".join(ops_list) if ops_list else "None",
+                        })
+                    
+                    st.dataframe(pd.DataFrame(summary_data), width="stretch", hide_index=True)
+                    effective_terms = batch_opts.get("anonymize_terms", parsed_anonymize_terms)
+                    _replace_raw = batch_opts.get("anonymize_replace", anonymize_replace_input)
+                    effective_replace = _replace_raw if _replace_raw != "" else " "
+                    
+                    with st.expander("Processing Details"):
+                        st.write("**Applied Processing Options:**")
+                        st.json({
+                            "Anonymize": batch_opts.get("anonymize", False),
+                            "Remove PII": batch_opts.get("remove_pii", False),
+                            "Extract to JSON": batch_opts.get("extract_json", False),
+                            "Throughput mode": batch_opts.get("throughput_mode", False),
+                            "Verbose logging": batch_opts.get("verbose_logging", False),
+                            "OCR enabled": batch_opts.get("ocr_enabled", False),
+                            "Anonymize terms (effective)": effective_terms,
+                            "Anonymize replace (effective)": effective_replace,
+                        })
+
+                        if processed_files and processed_files[0].get("metadata"):
+                            first_meta = processed_files[0]["metadata"]
+                            timing = first_meta.get("timing", {})
+                            st.write(f"**Timing (first file: {processed_files[0]['original_name']})**")
+                            if timing:
+                                timing_rows = [
+                                    {"Step": key.replace("_", " ").title(), "Seconds": round(value, 3)}
+                                    for key, value in timing.items()
+                                ]
+                                st.dataframe(pd.DataFrame(timing_rows), width="stretch", hide_index=True)
+                            else:
+                                st.info("Timing data not available for this file.")
+                            st.caption(f"Throughput mode applied: {'Yes' if first_meta.get('throughput_mode') else 'No'}")
+                            st.write("**Engine & Cache**")
+                            st.write(f"Cache hit: {'Yes' if first_meta.get('cache_hit') else 'No'}")
+                            pdf_engine = first_meta.get('pdf_engine')
+                            if pdf_engine:
+                                st.write(f"PDF engine: {pdf_engine}")
+                            ocr_meta = first_meta.get("ocr") or {}
+                            if ocr_meta:
+                                st.write("**OCR details**")
+                                st.write(
+                                    f"Engine: {ocr_meta.get('engine', 'unknown')} · "
+                                    f"Images processed: {ocr_meta.get('images_processed', 0)} · "
+                                    f"Skipped: {ocr_meta.get('images_skipped', 0)} "
+                                    f"(max per doc: {ocr_meta.get('max_images_per_doc', 'N/A')})"
+                                )
+                            ner_mode = first_meta.get("ner_mode")
+                            if ner_mode:
+                                st.write(f"NER mode: {ner_mode}")
+
+                        if batch_opts.get("extract_json") and processed_files and isinstance(processed_files[0]["content"], str):
+                            st.write("**JSON Output Preview (first file):**")
+                            try:
+                                json_preview = json.loads(processed_files[0]["content"])
+                                st.json(json_preview)
+                            except:
+                                st.text_area("JSON Content", processed_files[0]["content"][:1000] + "...", height=200)
+
+                    # Zip download
+                    zip_buffer = io.BytesIO()
+                    with zipfile.ZipFile(zip_buffer, "w") as zip_file:
+                        for pf in processed_files:
+                            content = pf["content"]
+                            if isinstance(content, str):
+                                content = content.encode('utf-8')
+                            zip_file.writestr(pf["name"], content)
+                    
+                    zip_buffer.seek(0)
+                    
+                    st.subheader("📦 Download All Files")
+                    download_filename = f"processed_documents_{datetime.now().strftime('%Y%m%d_%H%M%S')}.zip"
+                    st.download_button(
+                        label="📥 Download All as ZIP",
+                        data=zip_buffer,
+                        file_name=download_filename,
+                        mime="application/zip",
+                        width="stretch",
+                        help="Download all processed files as a ZIP archive"
+                    )
+            else:
+                # If the processing is cancelled, display partial result download options
+                with st.expander("📊 Partial Results", expanded=True):
+                    st.warning("Processing was cancelled. Here are the files that were completed before cancellation.")
+                    
+                    if processed_files:
+                        summary_data = []
+                        for pf in processed_files:
+                            content = pf["content"]
+                            if isinstance(content, bytes):
+                                content_size = len(content)
+                            elif isinstance(content, str):
+                                content_size = len(content.encode('utf-8'))
+                            else:
+                                content_size = 0
+                            
+                            ops = pf.get("operations") or batch_opts
+                            ops_list = []
+                            if ops.get("anonymize"):
+                                ops_list.append("Anonymize")
+                            if ops.get("remove_pii"):
+                                ops_list.append("Remove PII")
+                            if ops.get("extract_json"):
+                                ops_list.append("Extract JSON")
+                            
+                            summary_data.append({
+                                "Original File": pf["original_name"],
+                                "Processed File": pf["name"],
+                                "Output Format": pf["file_extension"],
+                                "Size (KB)": round(content_size / 1024, 2) if content_size else "N/A",
+                                "Operations": ", ".join(ops_list) if ops_list else "None",
+                            })
+                        
+                        st.dataframe(pd.DataFrame(summary_data), width="stretch", hide_index=True)
+                        
+                        # Partial Results ZIP Download
+                        zip_buffer = io.BytesIO()
+                        with zipfile.ZipFile(zip_buffer, "w") as zip_file:
+                            for pf in processed_files:
+                                content = pf["content"]
+                                if isinstance(content, str):
+                                    content = content.encode('utf-8')
+                                zip_file.writestr(pf["name"], content)
+                        
+                        zip_buffer.seek(0)
+                        
+                        st.download_button(
+                            label="📥 Download Completed Files as ZIP",
+                            data=zip_buffer,
+                            file_name=f"partial_results_{datetime.now().strftime('%Y%m%d_%H%M%S')}.zip",
+                            mime="application/zip",
+                            width="stretch",
+                            help="Download only the files that were completed before cancellation"
+                        )
 
     if processing_active:
         time.sleep(0.5)
@@ -705,6 +956,7 @@ with st.sidebar:
       - **Anonymize**: Remove personal identifiers
       - **Remove PII**: Remove Personally Identifiable Information
       - **Extract to JSON**: Convert document content to JSON format
+    - Stop long-running batch processing at any time
     - Download processed files immediately as they complete
     """)
     
@@ -722,16 +974,32 @@ with st.sidebar:
     
     st.header("⚙️ Processing Status")
     if st.session_state["processing_started"] and not st.session_state["processing_done"]:
-        st.info("Processing in progress…")
-        
-        # Display real-time statistics
-        completed = len(st.session_state.get("processing_results", []))
-        errors = len(st.session_state.get("processing_errors", []))
-        st.metric("Files Completed", f"{completed}/{st.session_state.get('processing_total', 0)}")
-        if errors > 0:
-            st.metric("Errors", errors, delta=f"-{errors}")
+        if st.session_state.get("processing_cancelled"):
+            st.warning("Processing cancelled")
+        else:
+            st.info("Processing in progress…")
+            
+            # Display real-time statistics
+            completed = len(st.session_state.get("processing_results", []))
+            errors = len(st.session_state.get("processing_errors", []))
+            cancelled = sum(1 for row in st.session_state.get("status_rows", []) if row.get("Status") == "Cancelled")
+            
+            st.metric("Files Completed", f"{completed}/{st.session_state.get('processing_total', 0)}")
+            if errors > 0:
+                st.metric("Errors", errors, delta=f"-{errors}")
+            if cancelled > 0:
+                st.metric("Cancelled", cancelled)
+                
+            # Display a stop button in the sidebar
+            if st.button("🛑 Stop Processing", type="secondary", use_container_width=True):
+                _cancel_processing()
+                st.rerun()
+                
     elif st.session_state["processing_done"]:
-        st.success("Processing completed!")
+        if st.session_state.get("processing_cancelled"):
+            st.warning("Processing was cancelled")
+        else:
+            st.success("Processing completed!")
     elif process_btn and not uploaded_files:
         st.error("Processing failed - no files")
     else:
