@@ -1133,6 +1133,7 @@ DocGuard/
 ├── .gitignore                  # Git exclusions
 └── app/
     ├── app.py                  # Streamlit UI application
+    ├── worker.py               # Isolated worker entrypoint
     ├── document_processor.py   # Core processing logic
     ├── config.py               # Configuration management
     ├── requirements.txt        # Python dependencies

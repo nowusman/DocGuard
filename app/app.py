@@ -228,6 +228,8 @@ def _init_processing_state():
         "cancel_flag": {"cancel_requested": False},
         "processing_cancelled": False,
         "processing_paused": False, 
+        "last_status_updates": {},  # Track the final status of each file to avoid duplicate updates
+        "last_rerun_time": 0,  # Track the time of the last rerun
     }
     for key, value in defaults.items():
         if key not in st.session_state:
@@ -257,28 +259,37 @@ def _drain_result_queue(anonymize, remove_pii, extract_json):
         )
         
         if msg_type == "status" and idx is not None and idx < len(st.session_state["status_rows"]):
-            st.session_state["status_rows"][idx]["Status"] = message.get("status", "Processing")
-            if "Progress" in st.session_state["status_rows"][idx]:
+            current_status = st.session_state["status_rows"][idx]["Status"]
+            new_status = message.get("status", "Processing")
+            
+            # Only update if status actually changed
+            if current_status != new_status or st.session_state["status_rows"][idx].get("Progress") != 50:
+                st.session_state["status_rows"][idx]["Status"] = new_status
                 st.session_state["status_rows"][idx]["Progress"] = 50
+                st.session_state["last_status_updates"][idx] = (new_status, 50)
+                updates += 1
         
         elif msg_type == "cancel":
             # Processing cancelled tasks
             if idx is not None and idx < len(st.session_state["status_rows"]):
-                if st.session_state["status_rows"][idx]["Status"] in ["Queued", "Processing"]:
+                current_status = st.session_state["status_rows"][idx]["Status"]
+                if current_status in ["Queued", "Processing"]:
                     st.session_state["status_rows"][idx]["Status"] = "Cancelled"
                     st.session_state["status_rows"][idx]["Progress"] = 0
-            updates += 1
+                    st.session_state["last_status_updates"][idx] = ("Cancelled", 0)
+                    updates += 1
         
         elif msg_type == "cancelled":
             # Process batch cancel
-            st.session_state["processing_cancelled"] = True
-            submitted = message.get("submitted", 0)
-            total = message.get("total", 0)
-            cancelled = message.get("cancelled", 0)
-            st.session_state["processing_errors"].append(
-                f"Processing cancelled by user. {submitted - cancelled} files were processed, {cancelled} files were cancelled."
-            )
-            updates += 1
+            if not st.session_state["processing_cancelled"]:
+                st.session_state["processing_cancelled"] = True
+                submitted = message.get("submitted", 0)
+                total = message.get("total", 0)
+                cancelled = message.get("cancelled", 0)
+                st.session_state["processing_errors"].append(
+                    f"Processing cancelled by user. {submitted - cancelled} files were processed, {cancelled} files were cancelled."
+                )
+                updates += 1
         
         elif msg_type == "result":
             output_filename = _derive_output_name(
@@ -299,22 +310,30 @@ def _drain_result_queue(anonymize, remove_pii, extract_json):
             st.session_state["processing_results"].append(result_data)
             
             if idx is not None and idx < len(st.session_state["status_rows"]):
-                st.session_state["status_rows"][idx]["Status"] = "Done"
-                st.session_state["status_rows"][idx]["Progress"] = 100
-                
-            updates += 1
+                current_status = st.session_state["status_rows"][idx]["Status"]
+                if current_status != "Done" or st.session_state["status_rows"][idx].get("Progress") != 100:
+                    st.session_state["status_rows"][idx]["Status"] = "Done"
+                    st.session_state["status_rows"][idx]["Progress"] = 100
+                    st.session_state["last_status_updates"][idx] = ("Done", 100)
+                    updates += 1
         
         elif msg_type == "error":
             if idx is not None and idx < len(st.session_state["status_rows"]):
-                st.session_state["status_rows"][idx]["Status"] = "Error"
-                st.session_state["status_rows"][idx]["Progress"] = 0
-            st.session_state["processing_errors"].append(
-                f"Error processing {message.get('original_name')}: {message.get('error')}"
-            )
-            updates += 1
+                current_status = st.session_state["status_rows"][idx]["Status"]
+                if current_status != "Error" or st.session_state["status_rows"][idx].get("Progress") != 0:
+                    st.session_state["status_rows"][idx]["Status"] = "Error"
+                    st.session_state["status_rows"][idx]["Progress"] = 0
+                    st.session_state["last_status_updates"][idx] = ("Error", 0)
+                    updates += 1
+            
+            error_msg = f"Error processing {message.get('original_name')}: {message.get('error')}"
+            if error_msg not in st.session_state["processing_errors"]:
+                st.session_state["processing_errors"].append(error_msg)
+                updates += 1
         
-        elif msg_type == "done":
+        elif msg_type == "done" and not st.session_state["processing_done"]:
             st.session_state["processing_done"] = True
+            updates += 1
     
     return updates
 
@@ -348,6 +367,26 @@ def _cancel_processing():
                 st.session_state["status_rows"][idx]["Progress"] = 0
         
         st.info("🛑 Processing cancellation requested. Stopping remaining tasks...")
+
+
+def _safe_rerun():
+    """Safely rerun the Streamlit app with WebSocket error handling."""
+    current_time = time.time()
+    
+    # Prevent excessive reruns (with a minimum interval of 0.5 seconds)
+    if current_time - st.session_state.get("last_rerun_time", 0) < 0.5:
+        return
+    
+    st.session_state["last_rerun_time"] = current_time
+    
+    try:
+        st.rerun()
+    except Exception as e:
+        # Ignore WebSocket-related errors
+        if "WebSocket" in str(e) or "Stream is closed" in str(e):
+            logging.debug(f"WebSocket closed during rerun: {e}")
+        else:
+            logging.error(f"Error during rerun: {e}")
 
 
 # Set page configuration
@@ -597,7 +636,8 @@ if st.session_state["processing_started"] or st.session_state["processing_done"]
         "ocr_enabled": bool(ocr_enabled),
     }
     
-    _drain_result_queue(batch_opts["anonymize"], batch_opts["remove_pii"], batch_opts["extract_json"])
+    # Drain the queue for updates
+    queue_updates = _drain_result_queue(batch_opts["anonymize"], batch_opts["remove_pii"], batch_opts["extract_json"])
     
     total_files = st.session_state["processing_total"]
     completed_count = len(st.session_state["processing_results"])
@@ -606,35 +646,42 @@ if st.session_state["processing_started"] or st.session_state["processing_done"]
     processing_count = sum(1 for row in st.session_state["status_rows"] if row["Status"] == "Processing")
     queued_count = sum(1 for row in st.session_state["status_rows"] if row["Status"] == "Queued")
     
-    # If the processing is cancelled, display the cancellation status
-    if st.session_state.get("processing_cancelled"):
-        with global_progress_container.container():
-            st.warning(f"🛑 Processing cancelled by user. {completed_count} files processed, {cancelled_count} files cancelled.")
-    
-    # Display global progress bar
-    elif total_files > 0:
-        progress_ratio = (completed_count + error_count + cancelled_count) / total_files
-        with global_progress_container.container():
-            st.subheader("📊 Global Progress")
-            progress_bar = st.progress(min(progress_ratio, 1.0), text=f"Processed {completed_count}/{total_files} files")
-            
-            # Progress statistics
-            col1, col2, col3, col4, col5 = st.columns(5)
-            with col1:
-                st.metric("Queued", queued_count)
-            with col2:
-                st.metric("Processing", processing_count)
-            with col3:
-                st.metric("Completed", completed_count)
-            with col4:
-                st.metric("Errors", error_count)
-            with col5:
-                st.metric("Cancelled", cancelled_count)
+    # Only update the global progress if there are updates or if it's the first render
+    if queue_updates > 0 or not hasattr(st.session_state, "global_progress_rendered"):
+        st.session_state["global_progress_rendered"] = True
+        
+        # If the processing is cancelled, display the cancellation status
+        if st.session_state.get("processing_cancelled"):
+            with global_progress_container.container():
+                st.warning(f"🛑 Processing cancelled by user. {completed_count} files processed, {cancelled_count} files cancelled.")
+        
+        # Display global progress bar
+        elif total_files > 0:
+            progress_ratio = (completed_count + error_count + cancelled_count) / total_files
+            with global_progress_container.container():
+                st.subheader("📊 Global Progress")
+                progress_bar = st.progress(min(progress_ratio, 1.0), text=f"Processed {completed_count}/{total_files} files")
+                
+                # Progress statistics
+                col1, col2, col3, col4, col5 = st.columns(5)
+                with col1:
+                    st.metric("Queued", queued_count)
+                with col2:
+                    st.metric("Processing", processing_count)
+                with col3:
+                    st.metric("Completed", completed_count)
+                with col4:
+                    st.metric("Errors", error_count)
+                with col5:
+                    st.metric("Cancelled", cancelled_count)
     
     # Display detailed progress of each file
     if st.session_state["status_rows"]:
         with status_placeholder.container():
             st.subheader("📋 File Processing Status")
+            
+            # Create a dictionary for quick lookup of results by order
+            result_by_order = {res.get("order"): res for res in st.session_state["processing_results"]}
             
             for idx, row in enumerate(st.session_state["status_rows"]):
                 col1, col2, col3, col4 = st.columns([3, 2, 3, 2])
@@ -656,12 +703,8 @@ if st.session_state["processing_started"] or st.session_state["processing_done"]
                 with col4:
                     # If the file is completed, display the download button immediately
                     if row["Status"] == "Done":
-                        # 
-                        result = None
-                        for res in st.session_state["processing_results"]:
-                            if res.get("order") == idx:
-                                result = res
-                                break
+                        # Get result from the dictionary for O(1) lookup
+                        result = result_by_order.get(idx)
                         
                         if result:
                             # Get file size
@@ -940,8 +983,8 @@ if st.session_state["processing_started"] or st.session_state["processing_done"]
                         )
 
     if processing_active:
-        time.sleep(0.5)
-        st.rerun()
+        time.sleep(1.5)  
+        _safe_rerun()  
 
 elif process_btn and not uploaded_files:
     st.warning("⚠️ Please upload at least one file to process.")
@@ -993,7 +1036,7 @@ with st.sidebar:
             # Display a stop button in the sidebar
             if st.button("🛑 Stop Processing", type="secondary", use_container_width=True):
                 _cancel_processing()
-                st.rerun()
+                _safe_rerun()
                 
     elif st.session_state["processing_done"]:
         if st.session_state.get("processing_cancelled"):
