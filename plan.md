@@ -35,12 +35,12 @@ Deliverables per phase include development, frontend, testing, deployment, clean
 - ✅Dev Complete - **Phase 4 (Caching)**: Near-instant re-processing for duplicate files
 - ✅Dev Complete - **Phase 5 (Async UI)**: Non-blocking UI; responsive during processing
 - ✅Dev Complete - **Phase 6 (spaCy optimization)**: 2–6× faster NER on document batches
-- **Phase 7 — Table extraction modernization**: Faster, more reliable table detection
-- **Phase 8 — Streaming results, progress bar, and per‑file availability**: Streaming results, progress tracking, cancellation, cleaner codebase
-- **Phase 9 — Cancel/kill processing from UI**: Additional control for users on UI
-- **Phase 10 — Multi‑session support hardening**: Better handling of multiple parallel sessions and multiple parallel users 
-- **Phase 11 — Cleanup, dead‑code removal, and migration completion**: Code cleanup and migration completion
-- **Phase 12 — Overall code review, testing, optimization and cleanup**: Review, testing and bug fixing
+- ✅Dev Complete - **Phase 7 — Table extraction modernization**: Faster, more reliable table detection
+- ✅Dev Complete - **Phase 8 — Streaming results, progress bar, and per‑file availability**: Streaming results, progress tracking, cancellation, cleaner codebase
+- ✅Dev Complete - **Phase 9 — Cancel/kill processing from UI**: Additional control for users on UI
+- ✅Dev Complete - **Phase 10 — Multi‑session support hardening**: Better handling of multiple parallel sessions and multiple parallel users 
+- ✅Dev Complete - **Phase 11 — Cleanup, dead‑code removal, and migration completion**: Code cleanup and migration completion
+- ✅Dev Complete - **Phase 12 — Overall code review, testing, optimization and cleanup**: Review, testing and bug fixing
 - **Phase 13 — Deployment, runtime tuning, and docs**: Deployment tune-up and documentation
 
 

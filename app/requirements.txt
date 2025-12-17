@@ -10,4 +10,3 @@ python-dotenv==1.0.1
 reportlab==4.4.4
 spacy==3.8.7
 streamlit==1.50.0
-camelot-py
