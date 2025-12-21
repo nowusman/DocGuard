@@ -335,18 +335,18 @@ Deliverables per phase include development, frontend, testing, deployment, clean
   - Faster, simpler table extraction with fewer dependencies
 - Development
   - Prefer PyMuPDF page.find_tables() when PDF_ENGINE==pymupdf
-  - Only run Camelot when extract_json is selected and feature flag explicitly enables “legacy tables”
+  
   - Add quick text-heuristic precheck to skip expensive table extraction if no table hints
 - Frontend
-  - Advanced: “Try legacy Camelot tables” toggle (default OFF)
+  - N/A (Camelot removed)
 - Testing
   - PDFs with and without tables; compare outputs
 - Deployment
   - None
 - Cleanup
-  - After validation, remove Camelot dependency and code paths entirely (requirements.txt, _extract_tables_from_pdf, _process_camelot_table, related helpers)
+  - After validation, remove Camelot dependency and code paths entirely (requirements.txt, _extract_tables_from_pdf, _process_camelot_table, related helpers) — completed
 - Documentation
-  - README: updated table extraction behavior, removed Camelot
+  - README: updated table extraction behavior, removed Camelot — completed
 - Acceptance criteria
   - Similar or better table recall with faster runtime; Camelot removed post‑validation
 
@@ -421,7 +421,7 @@ Deliverables per phase include development, frontend, testing, deployment, clean
 - Development
   - **Remove legacy PDF/OCR paths**:
     - Remove pdfplumber and Tesseract dependencies completely
-    - Remove Camelot code if Phase 7 succeeds; drop dependency from requirements.txt
+    - Remove Camelot code if Phase 7 succeeds; drop dependency from requirements.txt — completed
   - **In-memory image handling** (high-impact cleanup):
     - Replace all temp image file writes/reads with in-memory buffers
     - Current pattern (slow, I/O heavy):
@@ -444,10 +444,9 @@ Deliverables per phase include development, frontend, testing, deployment, clean
       ```
     - For PDF generation in _create_pdf_with_layout:
       ```python
-      from reportlab.lib.utils import ImageReader
       # No temp file needed
-      img_reader = ImageReader(io.BytesIO(img_data['image_data']))
-      img = Image(img_reader, width=400, height=300)
+      img_stream = io.BytesIO(img_data['image_data'])
+      img = Image(img_stream, width=400, height=300)
       story.append(img)
       ```
   - **Consolidate duplicate code**:
