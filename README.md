@@ -467,6 +467,15 @@
 | **Table Detection** | PyMuPDF-powered table extraction (page.find_tables) with header/footer clipping |}
 | **Table Detection** | PyMuPDF-powered table extraction (page.find_tables) with header/footer clipping |```
 | **Table Detection** | PyMuPDF-powered table extraction (page.find_tables) with header/footer clipping |
+| **Table Detection** | PyMuPDF-powered table extraction (page.find_tables) with header/footer clipping |### Streaming Results & Downloads
+| **Table Detection** | PyMuPDF-powered table extraction (page.find_tables) with header/footer clipping |
+| **Table Detection** | PyMuPDF-powered table extraction (page.find_tables) with header/footer clipping |DocGuard streams progress and results as soon as they are available:
+| **Table Detection** | PyMuPDF-powered table extraction (page.find_tables) with header/footer clipping |
+| **Table Detection** | PyMuPDF-powered table extraction (page.find_tables) with header/footer clipping |- **Global progress bar**: The **📊 Global Progress** section tracks overall batch completion and shows queued, processing, completed, error, and cancelled counts.
+| **Table Detection** | PyMuPDF-powered table extraction (page.find_tables) with header/footer clipping |- **Per-file status list**: The **📋 File Processing Status** list shows each file’s status and progress, plus inline download buttons once a file is marked **Done**.
+| **Table Detection** | PyMuPDF-powered table extraction (page.find_tables) with header/footer clipping |- **Immediate downloads**: As each file finishes, it appears in **📥 Immediate Download (Available Now)** so you can grab results right away without waiting for the full batch.
+| **Table Detection** | PyMuPDF-powered table extraction (page.find_tables) with header/footer clipping |- **Cancellation behavior**: If processing is stopped, **📊 Partial Results** lists completed files and provides **📥 Download Completed Files as ZIP** for the finished subset.
+| **Table Detection** | PyMuPDF-powered table extraction (page.find_tables) with header/footer clipping |
 | **Table Detection** | PyMuPDF-powered table extraction (page.find_tables) with header/footer clipping |### Advanced Options
 | **Table Detection** | PyMuPDF-powered table extraction (page.find_tables) with header/footer clipping |
 | **Table Detection** | PyMuPDF-powered table extraction (page.find_tables) with header/footer clipping |#### Throughput Mode
