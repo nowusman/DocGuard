@@ -8,6 +8,12 @@ services:
     ports:
       - "8501:8501"
     restart: unless-stopped
+    # Optional: Resource limits (recommended for typical workloads)
+    # deploy:
+    #   resources:
+    #     limits:
+    #       cpus: "4.0"
+    #       memory: 8G
 
 networks:
   default:
