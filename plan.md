@@ -35,12 +35,12 @@ Deliverables per phase include development, frontend, testing, deployment, clean
 - ✅Dev Complete - **Phase 4 (Caching)**: Near-instant re-processing for duplicate files
 - ✅Dev Complete - **Phase 5 (Async UI)**: Non-blocking UI; responsive during processing
 - ✅Dev Complete - **Phase 6 (spaCy optimization)**: 2–6× faster NER on document batches
-- **Phase 7 — Table extraction modernization**: Faster, more reliable table detection
-- **Phase 8 — Streaming results, progress bar, and per‑file availability**: Streaming results, progress tracking, cancellation, cleaner codebase
-- **Phase 9 — Cancel/kill processing from UI**: Additional control for users on UI
-- **Phase 10 — Multi‑session support hardening**: Better handling of multiple parallel sessions and multiple parallel users 
-- **Phase 11 — Cleanup, dead‑code removal, and migration completion**: Code cleanup and migration completion
-- **Phase 12 — Overall code review, testing, optimization and cleanup**: Review, testing and bug fixing
+- ✅Dev Complete - **Phase 7 — Table extraction modernization**: Faster, more reliable table detection
+- ✅Dev Complete - **Phase 8 — Streaming results, progress bar, and per‑file availability**: Streaming results, progress tracking, cancellation, cleaner codebase
+- ✅Dev Complete - **Phase 9 — Cancel/kill processing from UI**: Additional control for users on UI
+- ✅Dev Complete - **Phase 10 — Multi‑session support hardening**: Better handling of multiple parallel sessions and multiple parallel users 
+- ✅Dev Complete - **Phase 11 — Cleanup, dead‑code removal, and migration completion**: Code cleanup and migration completion
+- ✅Dev Complete - **Phase 12 — Overall code review, testing, optimization and cleanup**: Review, testing and bug fixing
 - **Phase 13 — Deployment, runtime tuning, and docs**: Deployment tune-up and documentation
 
 
@@ -335,18 +335,18 @@ Deliverables per phase include development, frontend, testing, deployment, clean
   - Faster, simpler table extraction with fewer dependencies
 - Development
   - Prefer PyMuPDF page.find_tables() when PDF_ENGINE==pymupdf
-  - Only run Camelot when extract_json is selected and feature flag explicitly enables “legacy tables”
+  
   - Add quick text-heuristic precheck to skip expensive table extraction if no table hints
 - Frontend
-  - Advanced: “Try legacy Camelot tables” toggle (default OFF)
+  - N/A (Camelot removed)
 - Testing
   - PDFs with and without tables; compare outputs
 - Deployment
   - None
 - Cleanup
-  - After validation, remove Camelot dependency and code paths entirely (requirements.txt, _extract_tables_from_pdf, _process_camelot_table, related helpers)
+  - After validation, remove Camelot dependency and code paths entirely (requirements.txt, _extract_tables_from_pdf, _process_camelot_table, related helpers) — completed
 - Documentation
-  - README: updated table extraction behavior, removed Camelot
+  - README: updated table extraction behavior, removed Camelot — completed
 - Acceptance criteria
   - Similar or better table recall with faster runtime; Camelot removed post‑validation
 
@@ -421,7 +421,7 @@ Deliverables per phase include development, frontend, testing, deployment, clean
 - Development
   - **Remove legacy PDF/OCR paths**:
     - Remove pdfplumber and Tesseract dependencies completely
-    - Remove Camelot code if Phase 7 succeeds; drop dependency from requirements.txt
+    - Remove Camelot code if Phase 7 succeeds; drop dependency from requirements.txt — completed
   - **In-memory image handling** (high-impact cleanup):
     - Replace all temp image file writes/reads with in-memory buffers
     - Current pattern (slow, I/O heavy):
@@ -444,10 +444,9 @@ Deliverables per phase include development, frontend, testing, deployment, clean
       ```
     - For PDF generation in _create_pdf_with_layout:
       ```python
-      from reportlab.lib.utils import ImageReader
       # No temp file needed
-      img_reader = ImageReader(io.BytesIO(img_data['image_data']))
-      img = Image(img_reader, width=400, height=300)
+      img_stream = io.BytesIO(img_data['image_data'])
+      img = Image(img_stream, width=400, height=300)
       story.append(img)
       ```
   - **Consolidate duplicate code**:
