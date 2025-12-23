@@ -56,6 +56,7 @@ class DocumentProcessor:
         self.default_anonymize_replace = ""
         self.anonymize_terms = []
         self.anonymize_replace = ""
+        self._anonymize_terms_regex = None
         # Load spaCy model
         try:
             self.nlp = spacy.load("en_core_web_sm")
@@ -578,21 +579,18 @@ class DocumentProcessor:
         replacement_source = replace_override if replace_override is not None else ""
         self.anonymize_terms = self._normalize_anonymization_terms(terms_source)
         self.anonymize_replace = "" if replacement_source is None else str(replacement_source)
+        if self.anonymize_terms:
+            pattern = "|".join(map(re.escape, self.anonymize_terms))
+            self._anonymize_terms_regex = re.compile(pattern, re.IGNORECASE)
+        else:
+            self._anonymize_terms_regex = None
 
     def _apply_anonymization_terms(self, text: str) -> str:
         """Apply configured anonymization terms to a text snippet."""
-        if not self.anonymize_terms:
+        if not self._anonymize_terms_regex:
             return text
-        anonymized_content = text
         replacement_value = " " if self.anonymize_replace == "" else self.anonymize_replace
-        for term in self.anonymize_terms:
-            anonymized_content = re.sub(
-                re.escape(term),
-                replacement_value,
-                anonymized_content,
-                flags=re.IGNORECASE
-            )
-        return anonymized_content
+        return self._anonymize_terms_regex.sub(replacement_value, text)
 
     def _apply_anonymization(self, content, file_extension, original_content):
         """Application anonymization processing - only for TXT and PDF"""
