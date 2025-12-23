@@ -70,8 +70,14 @@ class CancellableExecutor:
         return self
     
     def __exit__(self, exc_type, exc_val, exc_tb):
-        if self.executor:
-            self.executor.shutdown(wait=True)
+        self.shutdown(wait=True)
+
+    def shutdown(self, wait=True, cancel_futures=False):
+        with self.lock:
+            if cancel_futures:
+                self.cancelled = True
+            if self.executor:
+                self.executor.shutdown(wait=wait, cancel_futures=cancel_futures)
     
     def submit(self, fn, *args, **kwargs):
         """Submit task, return None if cancelled"""
@@ -93,6 +99,8 @@ class CancellableExecutor:
                 if not future.done():
                     future.cancel()
                     cancelled_count += 1
+            if self.executor:
+                self.executor.shutdown(wait=False, cancel_futures=True)
             return cancelled_count
 
 
@@ -106,6 +114,7 @@ def _run_background_batch(jobs, worker_count, result_queue, cancel_flag):
         for idx, job in enumerate(jobs):
             # Check cancel flag
             if cancel_flag.get("cancel_requested", False):
+                executor.shutdown(wait=False, cancel_futures=True)
                 # Mark remaining tasks as cancelled
                 for j in range(idx, len(jobs)):
                     result_queue.put({
@@ -160,8 +169,9 @@ def _run_background_batch(jobs, worker_count, result_queue, cancel_flag):
         for completed_future in as_completed(list(future_to_idx.keys())):
             # Check cancel flag
             if cancel_flag.get("cancel_requested", False):
-                # Cancel remaining tasks
-                cancelled = executor.cancel_all()
+                pending_futures = [future for future in future_to_idx.keys() if not future.done()]
+                executor.shutdown(wait=False, cancel_futures=True)
+                cancelled = len(pending_futures)
                 if cancelled > 0:
                     # Mark remaining tasks as cancelled
                     for idx in future_to_idx.values():
