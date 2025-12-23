@@ -250,7 +250,10 @@ class DocumentProcessor:
         if file_extension == '.txt':
             content, metadata = self._read_txt(file_content)
         elif file_extension == '.docx':
-            content, metadata = self._read_docx(file_content)
+            if anonymize or remove_pii:
+                content, metadata = None, None
+            else:
+                content, metadata = self._read_docx(file_content)
         elif file_extension == '.pdf':
             content, metadata = self._read_pdf(file_content)
         else:
@@ -268,31 +271,31 @@ class DocumentProcessor:
         # DOCX files, handle byte data when applying processing options
         if file_extension == '.docx':
             if anonymize or remove_pii:
-                
-                processed_bytes = file_content  
-                
+                processed_bytes = file_content
+
                 if anonymize:
                     processed_bytes = self._process_docx_xml(processed_bytes, 'anonymize')
-                
+
                 if remove_pii:
                     processed_bytes = self._process_docx_xml(processed_bytes, 'remove_pii')
-                
-                if anonymize or remove_pii:
-                    doc = Document(io.BytesIO(processed_bytes))
-                    content, tables_data, paragraphs = self._extract_docx_text_structures(doc)
-                    sanitized_metadata = deepcopy(metadata)
-                    sanitized_metadata['text_content'] = content
-                    sanitized_metadata['tables'] = tables_data
-                    sanitized_metadata['paragraphs'] = paragraphs
-                    metadata = sanitized_metadata
-                    
-                    if extract_json:
-                        result = self._extract_to_json(content, filename, file_extension, processing_info, metadata, file_content)
-                        return self._finalize_with_cache(result, '.json', metadata, cache_key)
-                    else:
-                        pdf_content = self._create_pdf_with_layout(content, filename, file_content, metadata)
-                        return self._finalize_with_cache(pdf_content, '.pdf', metadata, cache_key)
-            
+
+                doc = Document(io.BytesIO(processed_bytes))
+                content, tables_data, paragraphs = self._extract_docx_text_structures(doc)
+                images_data = self._extract_images_from_docx(doc, processed_bytes)
+                metadata = {
+                    'text_content': content,
+                    'tables': tables_data,
+                    'images': images_data,
+                    'paragraphs': paragraphs,
+                }
+
+                if extract_json:
+                    result = self._extract_to_json(content, filename, file_extension, processing_info, metadata, file_content)
+                    return self._finalize_with_cache(result, '.json', metadata, cache_key)
+                else:
+                    pdf_content = self._create_pdf_with_layout(content, filename, file_content, metadata)
+                    return self._finalize_with_cache(pdf_content, '.pdf', metadata, cache_key)
+
             if extract_json:
                 result = self._extract_to_json(content, filename, file_extension, processing_info, metadata, file_content)
                 return self._finalize_with_cache(result, '.json', metadata, cache_key)
