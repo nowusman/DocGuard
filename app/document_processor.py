@@ -41,7 +41,6 @@ from config import (
 
 class DocumentProcessor:
     def __init__(self):
-        self.supported_formats = ['.txt', '.docx', '.pdf']
         self.verbose_logging = VERBOSE_LOGGING
         self.throughput_mode = THROUGHPUT_MODE
         self.ocr_enabled = bool(OCR_CONFIG.get('enabled', True))
@@ -52,8 +51,6 @@ class DocumentProcessor:
         self._cache = OrderedDict()
         self._paddle_ocr = None
         self.ocr_engine = OCR_ENGINE
-        self.default_anonymize_terms = []
-        self.default_anonymize_replace = ""
         self.anonymize_terms = []
         self.anonymize_replace = ""
         self._anonymize_terms_regex = None

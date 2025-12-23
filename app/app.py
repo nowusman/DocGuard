@@ -236,8 +236,6 @@ def _init_processing_state():
         "cancel_requested": False,
         "cancel_flag": {"cancel_requested": False},
         "processing_cancelled": False,
-        "processing_paused": False, 
-        "last_status_updates": {},  # Track the final status of each file to avoid duplicate updates
         "last_rerun_time": 0,  # Track the time of the last rerun
     }
     for key, value in defaults.items():
@@ -275,7 +273,6 @@ def _drain_result_queue(anonymize, remove_pii, extract_json):
             if current_status != new_status or st.session_state["status_rows"][idx].get("Progress") != 50:
                 st.session_state["status_rows"][idx]["Status"] = new_status
                 st.session_state["status_rows"][idx]["Progress"] = 50
-                st.session_state["last_status_updates"][idx] = (new_status, 50)
                 updates += 1
         
         elif msg_type == "cancel":
@@ -285,7 +282,6 @@ def _drain_result_queue(anonymize, remove_pii, extract_json):
                 if current_status in ["Queued", "Processing"]:
                     st.session_state["status_rows"][idx]["Status"] = "Cancelled"
                     st.session_state["status_rows"][idx]["Progress"] = 0
-                    st.session_state["last_status_updates"][idx] = ("Cancelled", 0)
                     updates += 1
         
         elif msg_type == "cancelled":
@@ -323,7 +319,6 @@ def _drain_result_queue(anonymize, remove_pii, extract_json):
                 if current_status != "Done" or st.session_state["status_rows"][idx].get("Progress") != 100:
                     st.session_state["status_rows"][idx]["Status"] = "Done"
                     st.session_state["status_rows"][idx]["Progress"] = 100
-                    st.session_state["last_status_updates"][idx] = ("Done", 100)
                     updates += 1
         
         elif msg_type == "error":
@@ -332,7 +327,6 @@ def _drain_result_queue(anonymize, remove_pii, extract_json):
                 if current_status != "Error" or st.session_state["status_rows"][idx].get("Progress") != 0:
                     st.session_state["status_rows"][idx]["Status"] = "Error"
                     st.session_state["status_rows"][idx]["Progress"] = 0
-                    st.session_state["last_status_updates"][idx] = ("Error", 0)
                     updates += 1
             
             error_msg = f"Error processing {message.get('original_name')}: {message.get('error')}"
