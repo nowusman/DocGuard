@@ -827,7 +827,7 @@ class DocumentProcessor:
                         story.append(para)
                         story.append(Spacer(1, 6))
                     except Exception as para_error:
-                        print(f"Error creating paragraph: {para_error}")
+                        self._log(f"Error creating paragraph: {para_error}")
                         safe_text = "【The content contains characters that cannot be processed, skipped】"
                         para = Paragraph(safe_text, normal_style)
                         story.append(para)
@@ -1002,7 +1002,7 @@ class DocumentProcessor:
                         story.append(para)
                         story.append(Spacer(1, 6))
                     except Exception as para_error:
-                        print(f"Error creating paragraph: {para_error}")
+                        self._log(f"Error creating paragraph: {para_error}")
                         safe_text = "【The content contains characters that cannot be processed, skipped】"
                         para = Paragraph(safe_text, normal_style)
                         story.append(para)
@@ -1329,7 +1329,6 @@ class DocumentProcessor:
                 return pix
 
         except Exception as e:
-            print(f"Error extracting with PyMuPDF: {e}")
+            self._log(f"Error extracting with PyMuPDF: {e}")
 
         return None
-
