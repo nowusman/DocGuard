@@ -476,6 +476,10 @@
 | **Table Detection** | PyMuPDF-powered table extraction (page.find_tables) with header/footer clipping |- **Immediate downloads**: As each file finishes, it appears in **📥 Immediate Download (Available Now)** so you can grab results right away without waiting for the full batch.
 | **Table Detection** | PyMuPDF-powered table extraction (page.find_tables) with header/footer clipping |- **Cancellation behavior**: If processing is stopped, **📊 Partial Results** lists completed files and provides **📥 Download Completed Files as ZIP** for the finished subset.
 | **Table Detection** | PyMuPDF-powered table extraction (page.find_tables) with header/footer clipping |
+| **Table Detection** | PyMuPDF-powered table extraction (page.find_tables) with header/footer clipping |#### Stop Processing Button (UX)
+| **Table Detection** | PyMuPDF-powered table extraction (page.find_tables) with header/footer clipping |
+| **Table Detection** | PyMuPDF-powered table extraction (page.find_tables) with header/footer clipping |Use **🛑 Stop Processing** to halt a batch when you need to reclaim resources or adjust settings. Queued tasks are cancelled immediately, while tasks already running may finish. Any completed or partial results remain available for download in **📊 Partial Results** and **📥 Immediate Download (Available Now)**.
+| **Table Detection** | PyMuPDF-powered table extraction (page.find_tables) with header/footer clipping |
 | **Table Detection** | PyMuPDF-powered table extraction (page.find_tables) with header/footer clipping |### Advanced Options
 | **Table Detection** | PyMuPDF-powered table extraction (page.find_tables) with header/footer clipping |
 | **Table Detection** | PyMuPDF-powered table extraction (page.find_tables) with header/footer clipping |#### Throughput Mode
