@@ -803,38 +803,9 @@ class DocumentProcessor:
             )
             
             styles = getSampleStyleSheet()
-            title_style = styles['Heading1']
             normal_style = styles['Normal']
             
-            story = []
-            
-            title = Paragraph(f"Processed Document: {filename}", title_style)
-            story.append(title)
-            story.append(Spacer(1, 12))
-            
-            time_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-            time_para = Paragraph(f"Processed on: {time_str}", normal_style)
-            story.append(time_para)
-            story.append(Spacer(1, 12))
-            
-            story.append(Spacer(1, 6))
-            
-            paragraphs = content.split('\n')
-            for para_text in paragraphs:
-                if para_text.strip():  
-                    safe_text = html.escape(para_text)
-                    safe_text = safe_text.replace('\n', '<br/>')
-                    
-                    try:
-                        para = Paragraph(safe_text, normal_style)
-                        story.append(para)
-                        story.append(Spacer(1, 6))
-                    except Exception as para_error:
-                        self._log(f"Error creating paragraph: {para_error}")
-                        safe_text = "【The content contains characters that cannot be processed, skipped】"
-                        para = Paragraph(safe_text, normal_style)
-                        story.append(para)
-                        story.append(Spacer(1, 6))
+            story = self._build_pdf_story(content, filename, styles)
             
             tables = metadata.get('tables', [])
             if tables:
@@ -963,9 +934,6 @@ class DocumentProcessor:
         """
         start_time = perf_counter()
         try:
-            if isinstance(content, bytes):
-                content = content.decode('utf-8', errors='ignore')
-                
             pdf_buffer = io.BytesIO()
             
             doc = SimpleDocTemplate(
@@ -978,38 +946,7 @@ class DocumentProcessor:
             )
             
             styles = getSampleStyleSheet()
-            title_style = styles['Heading1']
-            normal_style = styles['Normal']
-            
-            story = []
-            
-            title = Paragraph(f"Processed Document: {filename}", title_style)
-            story.append(title)
-            story.append(Spacer(1, 12))
-            
-            time_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-            time_para = Paragraph(f"Processed on: {time_str}", normal_style)
-            story.append(time_para)
-            story.append(Spacer(1, 12))
-            
-            story.append(Spacer(1, 6))
-            
-            paragraphs = content.split('\n')
-            for para_text in paragraphs:
-                if para_text.strip():  
-                    safe_text = html.escape(para_text)
-                    safe_text = safe_text.replace('\n', '<br/>')
-                    
-                    try:
-                        para = Paragraph(safe_text, normal_style)
-                        story.append(para)
-                        story.append(Spacer(1, 6))
-                    except Exception as para_error:
-                        self._log(f"Error creating paragraph: {para_error}")
-                        safe_text = "【The content contains characters that cannot be processed, skipped】"
-                        para = Paragraph(safe_text, normal_style)
-                        story.append(para)
-                        story.append(Spacer(1, 6))
+            story = self._build_pdf_story(content, filename, styles)
             
             # Build PDF
             doc.build(story)
@@ -1024,6 +961,45 @@ class DocumentProcessor:
             return self._create_error_pdf(f"Error creating PDF: {str(e)}")
         finally:
             self._record_timing('pdf_generation', perf_counter() - start_time)
+
+    def _build_pdf_story(self, content, filename, styles):
+        if isinstance(content, bytes):
+            content = content.decode('utf-8', errors='ignore')
+
+        title_style = styles['Heading1']
+        normal_style = styles['Normal']
+
+        story = []
+
+        title = Paragraph(f"Processed Document: {filename}", title_style)
+        story.append(title)
+        story.append(Spacer(1, 12))
+
+        time_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        time_para = Paragraph(f"Processed on: {time_str}", normal_style)
+        story.append(time_para)
+        story.append(Spacer(1, 12))
+
+        story.append(Spacer(1, 6))
+
+        paragraphs = content.split('\n')
+        for para_text in paragraphs:
+            if para_text.strip():
+                safe_text = html.escape(para_text)
+                safe_text = safe_text.replace('\n', '<br/>')
+
+                try:
+                    para = Paragraph(safe_text, normal_style)
+                    story.append(para)
+                    story.append(Spacer(1, 6))
+                except Exception as para_error:
+                    self._log(f"Error creating paragraph: {para_error}")
+                    safe_text = "【The content contains characters that cannot be processed, skipped】"
+                    para = Paragraph(safe_text, normal_style)
+                    story.append(para)
+                    story.append(Spacer(1, 6))
+
+        return story
     
     def _create_error_pdf(self, error_message):
         """
