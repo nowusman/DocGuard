@@ -8,7 +8,7 @@ import os
 import re
 import html
 from collections import OrderedDict
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from copy import deepcopy
 from datetime import datetime
 
@@ -1139,7 +1139,8 @@ class DocumentProcessor:
 
                 futures[executor.submit(self._perform_ocr, img["image_data"])] = idx
 
-            for future, idx in futures.items():
+            for future in as_completed(futures):
+                idx = futures[future]
                 try:
                     extracted = future.result()
                     images[idx]["extracted_text"] = extracted
