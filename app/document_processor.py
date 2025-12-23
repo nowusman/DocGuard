@@ -449,7 +449,7 @@ class DocumentProcessor:
             'text_content': text,
             'tables': tables_data,
             'images': images_data,
-            'pdf_engine': 'pymupdf_single_pass'
+            'pdf_engine': f"{PDF_ENGINE}_single_pass"
         }
         self._record_timing('read_pdf', perf_counter() - read_start)
         return text, metadata
@@ -476,7 +476,7 @@ class DocumentProcessor:
             'text_content': text,
             'tables': [],
             'images': [],
-            'pdf_engine': 'pymupdf_text_only'
+            'pdf_engine': f"{PDF_ENGINE}_text_only"
         }
         self._record_timing('read_pdf', perf_counter() - start_time)
         return text, metadata
