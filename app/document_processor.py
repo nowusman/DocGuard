@@ -39,6 +39,17 @@ from config import (
     MAX_CACHE_ITEMS,
 )
 
+TABLE_INDICATORS = [
+    # Grid-like patterns
+    re.compile(r'\|\s*[\w\s]+\s*\|', re.IGNORECASE),  # Pipe separators
+    re.compile(r'\+[-]+\+', re.IGNORECASE),  # ASCII table borders
+    re.compile(r'[\w\s]+\s+\|\s+[\w\s]+', re.IGNORECASE),  # Text with pipe separator
+    re.compile(r'\b(table|tab\.?|tbl)\b', re.IGNORECASE),  # Table references
+    # Column-like patterns
+    re.compile(r'\s{4,}[\w\s]+\s{4,}[\w\s]+', re.IGNORECASE),  # Multiple spaces
+    re.compile(r'\t+[\w\s]+\t+[\w\s]+', re.IGNORECASE),  # Tabs as column separators
+]
+
 class DocumentProcessor:
     def __init__(self):
         self.verbose_logging = VERBOSE_LOGGING
@@ -171,21 +182,9 @@ class DocumentProcessor:
         if not text:
             return False
         
-        # Common table indicators
-        table_indicators = [
-            # Grid-like patterns
-            r'\|\s*[\w\s]+\s*\|',  # Pipe separators
-            r'\+[-]+\+',  # ASCII table borders
-            r'[\w\s]+\s+\|\s+[\w\s]+',  # Text with pipe separator
-            r'\b(table|tab\.?|tbl)\b',  # Table references
-            # Column-like patterns
-            r'\s{4,}[\w\s]+\s{4,}[\w\s]+',  # Multiple spaces as column separators
-            r'\t+[\w\s]+\t+[\w\s]+',  # Tabs as column separators
-        ]
-        
         # Check each pattern
-        for pattern in table_indicators:
-            if re.search(pattern, text, re.IGNORECASE):
+        for pattern in TABLE_INDICATORS:
+            if pattern.search(text):
                 return True
         
         # Check for numeric data in rows (potential data tables)
