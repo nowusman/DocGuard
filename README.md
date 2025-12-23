@@ -204,6 +204,12 @@
 | **Table Detection** | PyMuPDF-powered table extraction (page.find_tables) with header/footer clipping |                      └─> Size Limits (20MB/file, 100MB/batch, 10 files)
 | **Table Detection** | PyMuPDF-powered table extraction (page.find_tables) with header/footer clipping |```
 | **Table Detection** | PyMuPDF-powered table extraction (page.find_tables) with header/footer clipping |
+| **Table Detection** | PyMuPDF-powered table extraction (page.find_tables) with header/footer clipping |### Multi-session behavior
+| **Table Detection** | PyMuPDF-powered table extraction (page.find_tables) with header/footer clipping |
+| **Table Detection** | PyMuPDF-powered table extraction (page.find_tables) with header/footer clipping |- Each session maintains its own UI state and cancellation flags.
+| **Table Detection** | PyMuPDF-powered table extraction (page.find_tables) with header/footer clipping |- Processing runs in isolated worker pools per session.
+| **Table Detection** | PyMuPDF-powered table extraction (page.find_tables) with header/footer clipping |- Shared global state has been removed/avoided.
+| **Table Detection** | PyMuPDF-powered table extraction (page.find_tables) with header/footer clipping |
 | **Table Detection** | PyMuPDF-powered table extraction (page.find_tables) with header/footer clipping |### No External Dependencies
 | **Table Detection** | PyMuPDF-powered table extraction (page.find_tables) with header/footer clipping |
 | **Table Detection** | PyMuPDF-powered table extraction (page.find_tables) with header/footer clipping |- **No Database**: All processing in-memory
