@@ -604,16 +604,18 @@ class DocumentProcessor:
             pii_removed_content = pattern.sub('[PII_REMOVED]', pii_removed_content)
         return pii_removed_content
     
-    def _apply_spacy_entities_batch(self, texts):
+    def _apply_spacy_entities_batch(self, texts, regex_cleaned=False):
         """Apply spaCy entity redaction in batch for PERSON/ORG/GPE."""
         if not texts:
             return []
         if not self.nlp:
+            if regex_cleaned:
+                return list(texts)
             return [self._remove_pii_fast(text) for text in texts]
 
         redacted = []
         for doc, original in zip(self.nlp.pipe(texts, batch_size=50, n_process=1), texts):
-            base = self._remove_pii_fast(original)
+            base = original if regex_cleaned else self._remove_pii_fast(original)
             redacted.append(self._apply_ner_spans(base, doc))
         return redacted
 
@@ -648,7 +650,7 @@ class DocumentProcessor:
             regex_only = [self._remove_pii_fast(text) for text in texts]
             if self.throughput_mode or not self.nlp:
                 return regex_only
-            return self._apply_spacy_entities_batch(regex_only)
+            return self._apply_spacy_entities_batch(regex_only, regex_cleaned=True)
 
         return texts
 
@@ -672,7 +674,7 @@ class DocumentProcessor:
         regex_cleaned = self._remove_pii_fast(content)
         
         if not self.throughput_mode and self.nlp:
-            regex_cleaned = self._apply_spacy_entities_batch([regex_cleaned])[0]
+            regex_cleaned = self._apply_spacy_entities_batch([regex_cleaned], regex_cleaned=True)[0]
         
         self._record_timing('pii_removal', perf_counter() - start_time)
         return regex_cleaned
