@@ -19,7 +19,6 @@ from config import (
     MAX_FILES,
     MAX_FILE_SIZE_MB,
     MAX_WORKERS,
-    OCR_CONFIG,
     THROUGHPUT_MODE,
     VERBOSE_LOGGING,
 )
@@ -497,7 +496,6 @@ with col3:
 
 # OCR toggle (default ON)
 ocr_enabled = st.toggle("🖼️ OCR for images (PDF/DOCX)", value=True, help="Extract text from images via PaddleOCR with simple heuristics.")
-OCR_CONFIG['enabled'] = bool(ocr_enabled)
 
 # Advanced options expander keeps expert flags tucked away
 with st.expander("Advanced options"):
