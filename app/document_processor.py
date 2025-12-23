@@ -44,6 +44,7 @@ class DocumentProcessor:
         self.supported_formats = ['.txt', '.docx', '.pdf']
         self.verbose_logging = VERBOSE_LOGGING
         self.throughput_mode = THROUGHPUT_MODE
+        self.ocr_enabled = bool(OCR_CONFIG.get('enabled', True))
         self._timing = {}
         self._ocr_images_processed = 0
         self._ocr_images_skipped = 0
@@ -93,7 +94,7 @@ class DocumentProcessor:
             'remove_pii': bool(remove_pii),
             'extract_json': bool(extract_json),
             'throughput_mode': bool(self.throughput_mode),
-            'ocr_enabled': bool(OCR_CONFIG.get('enabled', True)),
+            'ocr_enabled': bool(self.ocr_enabled),
             'options': options or {}
         }
         hasher.update(json.dumps(normalized, sort_keys=True, default=str).encode('utf-8'))
@@ -127,7 +128,7 @@ class DocumentProcessor:
             'images_processed': self._ocr_images_processed,
             'images_skipped': self._ocr_images_skipped,
             'max_images_per_doc': OCR_MAX_IMAGES_PER_DOC,
-            'enabled': bool(OCR_CONFIG.get('enabled', True)) and not self.throughput_mode,
+            'enabled': bool(self.ocr_enabled) and not self.throughput_mode,
         }
         return metadata
 
@@ -218,7 +219,7 @@ class DocumentProcessor:
         self.verbose_logging = options.get('verbose_logging', VERBOSE_LOGGING)
         self.throughput_mode = options.get('throughput_mode', THROUGHPUT_MODE)
         if 'ocr_enabled' in options:
-            OCR_CONFIG['enabled'] = bool(options['ocr_enabled'])
+            self.ocr_enabled = bool(options['ocr_enabled'])
         self._set_anonymization_settings(
             options.get('anonymize_terms'),
             options.get('anonymize_replace'),
@@ -1124,7 +1125,7 @@ class DocumentProcessor:
         if not images:
             return []
 
-        if self.throughput_mode or not OCR_CONFIG.get('enabled', True):
+        if self.throughput_mode or not self.ocr_enabled:
             reason = "[OCR disabled in throughput mode]" if self.throughput_mode else "[OCR disabled]"
             for img in images:
                 img["extracted_text"] = reason
