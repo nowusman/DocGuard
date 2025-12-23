@@ -1332,6 +1332,3 @@ class DocumentProcessor:
 
         return None
 
-
-# Create a global processor instance
-processor = DocumentProcessor()
