@@ -89,20 +89,6 @@ class CancellableExecutor:
                 return future
         return None
     
-    def cancel_all(self):
-        """Cancel all unfinished tasks"""
-        with self.lock:
-            self.cancelled = True
-            cancelled_count = 0
-            for future in self.futures:
-                if not future.done():
-                    future.cancel()
-                    cancelled_count += 1
-            if self.executor:
-                self.executor.shutdown(wait=False, cancel_futures=True)
-            return cancelled_count
-
-
 def _run_background_batch(jobs, worker_count, result_queue, cancel_flag):
     """Run ProcessPool work in a background thread and stream updates into a queue."""
     with CancellableExecutor(max_workers=worker_count) as executor:
