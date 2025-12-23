@@ -617,10 +617,11 @@
 | **Table Detection** | PyMuPDF-powered table extraction (page.find_tables) with header/footer clipping |
 | **Table Detection** | PyMuPDF-powered table extraction (page.find_tables) with header/footer clipping |```bash
 | **Table Detection** | PyMuPDF-powered table extraction (page.find_tables) with header/footer clipping |# .env
-| **Table Detection** | PyMuPDF-powered table extraction (page.find_tables) with header/footer clipping |MAX_WORKERS=8  # Match available CPU cores
+| **Table Detection** | PyMuPDF-powered table extraction (page.find_tables) with header/footer clipping |MAX_WORKERS=8  # Overrides CPU count (preferred)
+| **Table Detection** | PyMuPDF-powered table extraction (page.find_tables) with header/footer clipping |# WORKERS=8     # Legacy fallback if MAX_WORKERS is unset
 | **Table Detection** | PyMuPDF-powered table extraction (page.find_tables) with header/footer clipping |```
 | **Table Detection** | PyMuPDF-powered table extraction (page.find_tables) with header/footer clipping |
-| **Table Detection** | PyMuPDF-powered table extraction (page.find_tables) with header/footer clipping |**Guideline**: Set to `os.cpu_count()` for CPU-bound workloads
+| **Table Detection** | PyMuPDF-powered table extraction (page.find_tables) with header/footer clipping |**Guideline**: Defaults to `os.cpu_count()` when `MAX_WORKERS` (or legacy `WORKERS`) is unset
 | **Table Detection** | PyMuPDF-powered table extraction (page.find_tables) with header/footer clipping |
 | **Table Detection** | PyMuPDF-powered table extraction (page.find_tables) with header/footer clipping |#### 3. Adjust OCR Settings
 | **Table Detection** | PyMuPDF-powered table extraction (page.find_tables) with header/footer clipping |

@@ -38,7 +38,7 @@ VERBOSE_LOGGING = _get_bool("VERBOSE_LOGGING", False)
 # Hardcoded/internal defaults
 PDF_ENGINE = "pymupdf"
 OCR_ENGINE = "paddle"
-MAX_WORKERS = os.cpu_count() or 4
+MAX_WORKERS = _get_int("MAX_WORKERS", _get_int("WORKERS", os.cpu_count() or 4))
 MAX_CACHE_ITEMS = _get_int("MAX_CACHE_ITEMS", 64)
 
 # PII Detection Mode (precompile for speed)
