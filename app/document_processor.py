@@ -149,6 +149,31 @@ class DocumentProcessor:
         if cache_key:
             self._store_cache_result(cache_key, result)
         return result
+
+    def _finalize_docx_output(
+        self,
+        content,
+        filename,
+        file_extension,
+        processing_info,
+        metadata,
+        file_content,
+        extract_json,
+        cache_key,
+    ):
+        if extract_json:
+            result = self._extract_to_json(
+                content,
+                filename,
+                file_extension,
+                processing_info,
+                metadata,
+                file_content,
+            )
+            return self._finalize_with_cache(result, '.json', metadata, cache_key)
+
+        pdf_content = self._create_pdf_with_layout(content, filename, file_content, metadata)
+        return self._finalize_with_cache(pdf_content, '.pdf', metadata, cache_key)
     
     def _check_ocr_availability(self):
         """
@@ -285,20 +310,27 @@ class DocumentProcessor:
                     'images': images_data,
                     'paragraphs': paragraphs,
                 }
+                return self._finalize_docx_output(
+                    content,
+                    filename,
+                    file_extension,
+                    processing_info,
+                    metadata,
+                    file_content,
+                    extract_json,
+                    cache_key,
+                )
 
-                if extract_json:
-                    result = self._extract_to_json(content, filename, file_extension, processing_info, metadata, file_content)
-                    return self._finalize_with_cache(result, '.json', metadata, cache_key)
-                else:
-                    pdf_content = self._create_pdf_with_layout(content, filename, file_content, metadata)
-                    return self._finalize_with_cache(pdf_content, '.pdf', metadata, cache_key)
-
-            if extract_json:
-                result = self._extract_to_json(content, filename, file_extension, processing_info, metadata, file_content)
-                return self._finalize_with_cache(result, '.json', metadata, cache_key)
-            else:
-                pdf_content = self._create_pdf_with_layout(content, filename, file_content, metadata)
-                return self._finalize_with_cache(pdf_content, '.pdf', metadata, cache_key)
+            return self._finalize_docx_output(
+                content,
+                filename,
+                file_extension,
+                processing_info,
+                metadata,
+                file_content,
+                extract_json,
+                cache_key,
+            )
         
         else:
             # TXT and PDF files, use the existing string processing logic
