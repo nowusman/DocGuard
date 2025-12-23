@@ -361,9 +361,12 @@ class DocumentProcessor:
         """Extract docx text, tables, and paragraphs in a reusable way."""
         full_text = []
         tables_data = []
+        paragraphs = []
 
         for paragraph in doc.paragraphs:
             full_text.append(paragraph.text)
+            if paragraph.text.strip():
+                paragraphs.append(paragraph.text)
 
         for table_idx, table in enumerate(doc.tables):
             table_data = []
@@ -380,7 +383,6 @@ class DocumentProcessor:
             for row in table_data:
                 full_text.append(' | '.join(row))
 
-        paragraphs = [p.text for p in doc.paragraphs if p.text.strip()]
         content = '\n'.join(full_text)
         return content, tables_data, paragraphs
     
