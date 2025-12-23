@@ -824,6 +824,12 @@
 | **Table Detection** | PyMuPDF-powered table extraction (page.find_tables) with header/footer clipping |
 | **Table Detection** | PyMuPDF-powered table extraction (page.find_tables) with header/footer clipping |### Testing Checklist
 | **Table Detection** | PyMuPDF-powered table extraction (page.find_tables) with header/footer clipping |
+| **Table Detection** | PyMuPDF-powered table extraction (page.find_tables) with header/footer clipping |#### QA Checklist (Manual)
+| **Table Detection** | PyMuPDF-powered table extraction (page.find_tables) with header/footer clipping |
+| **Table Detection** | PyMuPDF-powered table extraction (page.find_tables) with header/footer clipping |- [ ] **PDF with clear tables**: Use a text-based `.pdf` (not scanned) containing a few clean tables; verify `page.find_tables()` detects the expected row/column counts and the output JSON metadata includes `tables` entries with headers/cells.
+| **Table Detection** | PyMuPDF-powered table extraction (page.find_tables) with header/footer clipping |- [ ] **PDF without tables**: Use a text-based `.pdf` that contains only paragraphs; confirm table heuristics skip extraction and the JSON metadata reports no tables (empty `tables` array).
+| **Table Detection** | PyMuPDF-powered table extraction (page.find_tables) with header/footer clipping |- [ ] **Table-heavy PDF**: Use a `.pdf` dominated by tables (multiple pages); confirm processing completes in an acceptable time and JSON metadata includes tables for each relevant page.
+| **Table Detection** | PyMuPDF-powered table extraction (page.find_tables) with header/footer clipping |
 | **Table Detection** | PyMuPDF-powered table extraction (page.find_tables) with header/footer clipping |#### Functional Testing
 | **Table Detection** | PyMuPDF-powered table extraction (page.find_tables) with header/footer clipping |
 | **Table Detection** | PyMuPDF-powered table extraction (page.find_tables) with header/footer clipping |- [ ] Upload exactly `MAX_FILES` (10) documents
