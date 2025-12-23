@@ -442,11 +442,30 @@ uploaded_files = st.file_uploader(
     help=f"You can upload up to {MAX_FILES} files of type .txt, .docx, or .pdf"
 )
 
+# Limit the number of files
+if uploaded_files and len(uploaded_files) > MAX_FILES:
+    st.error(f"You can only upload up to {MAX_FILES} files. Please remove some files.")
+    uploaded_files = uploaded_files[:MAX_FILES]
+
+uploaded_file_records = []
+if uploaded_files:
+    for file in uploaded_files:
+        file_bytes = file.getvalue()
+        uploaded_file_records.append({
+            "file": file,
+            "bytes": file_bytes,
+            "size": len(file_bytes),
+        })
+
 # Validate size limits
 size_ok = True
-if uploaded_files:
-    total_bytes = sum(len(f.getvalue()) for f in uploaded_files)
-    oversized = [(f.name, len(f.getvalue())) for f in uploaded_files if len(f.getvalue()) > MAX_FILE_SIZE_MB * 1024 * 1024]
+if uploaded_file_records:
+    total_bytes = sum(record["size"] for record in uploaded_file_records)
+    oversized = [
+        (record["file"].name, record["size"])
+        for record in uploaded_file_records
+        if record["size"] > MAX_FILE_SIZE_MB * 1024 * 1024
+    ]
     if oversized:
         size_ok = False
         st.error(
@@ -463,21 +482,17 @@ if uploaded_files:
             )
         )
 
-# Limit the number of files
-if uploaded_files and len(uploaded_files) > MAX_FILES:
-    st.error(f"You can only upload up to {MAX_FILES} files. Please remove some files.")
-    uploaded_files = uploaded_files[:MAX_FILES]
-
 # Display uploaded file information
-if uploaded_files:
+if uploaded_file_records:
     st.subheader("Uploaded Files")
     file_info = []
-    for i, file in enumerate(uploaded_files):
+    for i, record in enumerate(uploaded_file_records):
+        file = record["file"]
         file_info.append({
             "No.": i+1,
             "File Name": file.name,
             "File Type": file.type if hasattr(file, 'type') else "Unknown",
-            "Size (KB)": round(len(file.getvalue()) / 1024, 2)
+            "Size (KB)": round(record["size"] / 1024, 2)
         })
     
     df_files = pd.DataFrame(file_info)
@@ -565,7 +580,7 @@ status_placeholder = st.empty()
 immediate_download_container = st.container() 
 global_progress_container = st.empty()
 
-if process_btn and uploaded_files and size_ok and (anonymize or remove_pii or extract_json):
+if process_btn and uploaded_file_records and size_ok and (anonymize or remove_pii or extract_json):
     if st.session_state["processing_started"] and not st.session_state["processing_done"]:
         st.info("Processing is already running. Please wait for it to finish or stop it first.")
     else:
@@ -576,15 +591,15 @@ if process_btn and uploaded_files and size_ok and (anonymize or remove_pii or ex
         st.session_state["processing_cancelled"] = False
         st.session_state["cancel_requested"] = False
         st.session_state["cancel_flag"] = {"cancel_requested": False}
-        st.session_state["processing_total"] = len(uploaded_files)
+        st.session_state["processing_total"] = len(uploaded_file_records)
         
         # Initialization status line, including progress field
         st.session_state["status_rows"] = [
             {
-                "File": file.name, 
+                "File": record["file"].name,
                 "Status": "Queued",
                 "Progress": 0
-            } for file in uploaded_files
+            } for record in uploaded_file_records
         ]
         
         batch_options_snapshot = {
@@ -601,10 +616,10 @@ if process_btn and uploaded_files and size_ok and (anonymize or remove_pii or ex
         st.session_state["job_operations"] = []
 
         jobs = []
-        for order, file in enumerate(uploaded_files):
-            file_bytes = file.getvalue()
+        for order, record in enumerate(uploaded_file_records):
+            file = record["file"]
             payload = {
-                "file_content": file_bytes,
+                "file_content": record["bytes"],
                 "filename": file.name,
                 "anonymize": anonymize,
                 "remove_pii": remove_pii,
@@ -1014,7 +1029,7 @@ with st.sidebar:
     st.header("📊 Statistics")
     if uploaded_files:
         st.write(f"Files uploaded: {len(uploaded_files)}/{MAX_FILES}")
-        total_size_kb = sum(len(file.getvalue()) for file in uploaded_files) / 1024
+        total_size_kb = sum(record["size"] for record in uploaded_file_records) / 1024
         c1, c2 = st.columns(2)
         with c1:
             st.metric(label="Files", value=f"{len(uploaded_files)}/{MAX_FILES}")
